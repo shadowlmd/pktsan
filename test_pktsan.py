@@ -406,6 +406,16 @@ def default_config_next_to_program():
     r = subprocess.run([exe], cwd=env.dir, capture_output=True)
     assert r.returncode == 0 and r.stdout == b"", r
     assert "processed 1.pkt" in env.logtext()
+    # started by a relative path: the config is still next to the program
+    os.remove(env.log)
+    r = subprocess.run([os.path.join("..", "bin", "pktsan")], cwd=env.dir, capture_output=True)
+    assert r.returncode == 0 and r.stdout == b"", r
+    assert "processed 1.pkt" in env.logtext()
+    # started without a path (found in PATH): the config is looked for
+    # in the current directory
+    r = subprocess.run(["pktsan"], cwd=env.dir, capture_output=True,
+                       env=dict(os.environ, PATH=bindir))
+    assert r.returncode == 0 and b"[info] processed 1.pkt" in r.stdout, r
     # no config at all: defaults, log to stdout
     os.remove(os.path.join(bindir, "pktsan.cfg"))
     r = subprocess.run([exe], cwd=env.dir, capture_output=True)
@@ -414,20 +424,14 @@ def default_config_next_to_program():
 
 
 @test
-def directories_as_arguments():
+def arguments_rejected():
     env = Env()
-    d2 = os.path.join(env.root, "in2")
-    os.mkdir(d2)
-    env.put("1.pkt", packet([pmsg(to=b"x" * 40)]))
-    with open(os.path.join(d2, "2.pkt"), "wb") as f:
-        f.write(packet([pmsg(frm=b"y" * 40)]))
-    r = env.run([env.dir, d2 + "/"], cwd=env.root)
-    assert r.returncode == 0, r
-    warns = [l[1] for l in env.loglines("warn")]
-    assert warns == ["truncated toUserName to 35 bytes (was 40) in message #1 in %s/1.pkt" % env.dir,
-                     "truncated fromUserName to 35 bytes (was 40) in message #1 in %s/2.pkt" % d2]
-    r = env.run([os.path.join(env.root, "nodir")])
-    assert r.returncode == 1 and "can't read directory" in env.logtext()
+    data = packet([pmsg(to=b"x" * 40)])
+    env.put("1.pkt", data)
+    for args in ([env.dir], ["."], ["-x"], ["-c"], ["-c", env.cfg, "."]):
+        r = subprocess.run([EXE] + args, cwd=env.dir, capture_output=True)
+        assert r.returncode == 1 and b"unknown argument" in r.stderr, (args, r)
+    assert env.get("1.pkt") == data and env.logtext() == ""
     env.cleanup()
 
 

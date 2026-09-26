@@ -109,34 +109,6 @@ static int StrICmp(const char * a, const char * b)
     return tolower((unsigned char)*a) - tolower((unsigned char)*b);
 }
 
-static int IsSep(char c)
-{
-    return c == '/' || c == '\\' || c == ':';
-}
-
-static char * JoinPath(const char * Dir, const char * Name)
-{
-    size_t l;
-    char * p;
-
-    if(Dir == NULL || strcmp(Dir, ".") == 0)
-    {
-        return StrDup(Name);
-    }
-
-    l = strlen(Dir);
-    p = (char *)Alloc(l + strlen(Name) + 2);
-    strcpy(p, Dir);
-
-    if(l > 0 && !IsSep(Dir[l - 1]))
-    {
-        p[l++] = strchr(Dir, '\\') != NULL ? '\\' : '/';
-    }
-
-    strcpy(p + l, Name);
-    return p;
-}
-
 /* "name.xxx" -> "name" + Ext */
 static char * ChangeExt(const char * Name, const char * Ext)
 {
@@ -158,32 +130,22 @@ static int HasExt(const char * Name, const char * Ext)
 /* ------------------------------------------------------------------ */
 /* Configuration                                                      */
 
+/* CONFIGNAME in the directory of the program */
 static char * ConfigPath(const char * Argv0)
 {
-    const char * Sep = NULL;
-    const char * p;
-    char * Dir;
-    char * Res;
+    size_t l = strlen(Argv0);
+    char * p;
 
-    for(p = Argv0; *p != '\0'; p++)
+    while(l > 0 && Argv0[l - 1] != '/' && Argv0[l - 1] != '\\' &&
+          Argv0[l - 1] != ':')
     {
-        if(IsSep(*p))
-        {
-            Sep = p;
-        }
+        l--;
     }
 
-    if(Sep == NULL)
-    {
-        return StrDup(CONFIGNAME);
-    }
-
-    Dir = (char *)Alloc(Sep - Argv0 + 2);
-    memcpy(Dir, Argv0, Sep - Argv0 + 1);
-    Dir[Sep - Argv0 + 1] = '\0';
-    Res = JoinPath(Dir, CONFIGNAME);
-    free(Dir);
-    return Res;
+    p = (char *)Alloc(l + strlen(CONFIGNAME) + 1);
+    memcpy(p, Argv0, l);
+    strcpy(p + l, CONFIGNAME);
+    return p;
 }
 
 static char * Trim(char * s)
@@ -586,8 +548,8 @@ static long FindName(char ** List, long Count, const char * Name)
     return -1;
 }
 
-/* Returns the number of errors. */
-static int ProcessDir(const char * Dir)
+/* Processes the current directory. Returns the number of errors. */
+static int ProcessDir(void)
 {
     char ** Pkts = NULL;
     char ** Tmps = NULL;
@@ -597,11 +559,11 @@ static int ProcessDir(const char * Dir)
     struct dirent * de;
 
     errno = 0;
-    d = opendir(Dir);
+    d = opendir(".");
 
     if(d == NULL)
     {
-        Log(LOG_WARN, "can't read directory %s: %s", Dir, strerror(errno));
+        Log(LOG_WARN, "can't read the current directory: %s", strerror(errno));
         return 1;
     }
 
@@ -611,11 +573,8 @@ static int ProcessDir(const char * Dir)
 
         if(Pkt || HasExt(de->d_name, ".tr$"))
         {
-            char * Path = JoinPath(Dir, de->d_name);
             struct stat st;
-            int Reg = stat(Path, &st) == 0 && S_ISREG(st.st_mode);
-
-            free(Path);
+            int Reg = stat(de->d_name, &st) == 0 && S_ISREG(st.st_mode);
 
             if(Reg && Pkt)
             {
@@ -638,9 +597,8 @@ static int ProcessDir(const char * Dir)
     /* temporary files left by an interrupted run */
     for(i = 0; i < NTmps; i++)
     {
-        char * Tmp  = JoinPath(Dir, Tmps[i]);
-        char * Name = ChangeExt(Tmps[i], ".pkt");
-        char * Path = JoinPath(Dir, Name);
+        char * Tmp  = Tmps[i];
+        char * Name = ChangeExt(Tmp, ".pkt");
 
         if(FindName(Pkts, NPkts, Name) >= 0)
         {
@@ -657,22 +615,20 @@ static int ProcessDir(const char * Dir)
 
             free(Name);
         }
-        else if(rename(Tmp, Path) == 0)
+        else if(rename(Tmp, Name) == 0)
         {
-            Log(LOG_WARN, "restored %s from temporary file %s", Path, Tmp);
+            Log(LOG_WARN, "restored %s from temporary file %s", Name, Tmp);
             AddName(&Pkts, &NPkts, &SPkts, Name);
         }
         else
         {
-            Log(LOG_WARN, "can't rename %s to %s: %s", Tmp, Path,
+            Log(LOG_WARN, "can't rename %s to %s: %s", Tmp, Name,
                 strerror(errno));
             Errors++;
             free(Name);
         }
 
         free(Tmp);
-        free(Path);
-        free(Tmps[i]);
     }
 
     free(Tmps);
@@ -684,13 +640,9 @@ static int ProcessDir(const char * Dir)
 
     for(i = 0; i < NPkts; i++)
     {
-        char * Path = JoinPath(Dir, Pkts[i]);
-        char * Name = ChangeExt(Pkts[i], ".tr$");
-        char * Tmp  = JoinPath(Dir, Name);
+        char * Tmp = ChangeExt(Pkts[i], ".tr$");
 
-        Errors += ProcessPacket(Path, Tmp);
-        free(Path);
-        free(Name);
+        Errors += ProcessPacket(Pkts[i], Tmp);
         free(Tmp);
         free(Pkts[i]);
     }
@@ -705,10 +657,9 @@ static void Usage(void)
 {
     printf("PKT Sanitizer " VERSION " - truncate too long names and subjects "
            "in FTS-0001 packets\n\n"
-           "Usage: " PROGNAME " [-c config] [directory ...]\n\n"
-           "Processes all *.pkt files in the given directories (the current\n"
-           "directory by default). The default config is " CONFIGNAME
-           " in the\nprogram directory.\n");
+           "Usage: " PROGNAME " [-c config]\n\n"
+           "Processes all *.pkt files in the current directory. The default\n"
+           "config is " CONFIGNAME " in the program directory.\n");
 }
 
 int main(int argc, char ** argv)
@@ -716,7 +667,6 @@ int main(int argc, char ** argv)
     char * Cfg = NULL;
     char * LogFile = NULL;
     int CfgRequired = 0;
-    int First = argc;
     int Errors = 0;
     int i;
 
@@ -734,15 +684,11 @@ int main(int argc, char ** argv)
             Usage();
             return 0;
         }
-        else if(argv[i][0] == '-' && argv[i][1] != '\0')
-        {
-            fprintf(stderr, PROGNAME ": unknown option '%s'\n", argv[i]);
-            return 1;
-        }
         else
         {
-            First = i;
-            break;
+            fprintf(stderr, PROGNAME ": unknown argument '%s'\n", argv[i]);
+            free(Cfg);
+            return 1;
         }
     }
 
@@ -772,15 +718,7 @@ int main(int argc, char ** argv)
         }
     }
 
-    if(First == argc)
-    {
-        Errors += ProcessDir(".");
-    }
-
-    for(i = First; i < argc; i++)
-    {
-        Errors += ProcessDir(argv[i]);
-    }
+    Errors = ProcessDir();
 
     if(LogFh != NULL)
     {

@@ -22,8 +22,8 @@ truncates the overlong strings, and FastEcho then receives valid packets.
 
 ## What it does
 
-- It processes every `*.pkt` file in the given directories, or in the current
-  directory if none are given. The `.pkt` extension is matched in any case.
+- It processes every `*.pkt` file in the current directory. The `.pkt`
+  extension is matched in any case.
 - It reads `toUserName`, `fromUserName` and `subject` up to their terminating
   null, as FTS-0001 requires. It truncates them to 35, 35 and 71 bytes and
   logs a warning for each truncation.
@@ -54,37 +54,36 @@ If a run is interrupted, the next run cleans up after it:
 ## Using it with FastEcho
 
 In FastEcho setup, open the "External programs (After Unpack)" field
-(section 5.4.12.1 of the FastEcho manual) and enter the pktsan command line.
+(section 5.4.12.1 of the FastEcho manual) and enter pktsan with its full
+path:
+
+```
+c:\ftn\pktsan\pktsan.exe
+```
+
 FastEcho runs this command during `FastEcho TOSS`, after it has unpacked the
-incoming mail bundles.
-
-FastEcho may place the unpacked packets in the Inbound, Temporary Inbound and
-Local Inbound directories. List all of them on the command line. Use full
-paths everywhere: for the program, for the config (`-c`) and for the
-directories. Then pktsan works no matter which directory FastEcho starts it
-in. For example:
-
-```
-c:\ftn\pktsan\pktsan.exe -c c:\ftn\pktsan\pktsan.cfg c:\ftn\inbound c:\ftn\inbound\temp c:\ftn\inbound\local
-```
+incoming mail bundles. pktsan processes the packets in the directory FastEcho
+starts it in.
 
 ## Command line
 
 ```
-pktsan [-c config] [directory ...]
+pktsan [-c config]
 ```
 
-- `-c config` sets the config file. Without `-c`, pktsan reads `pktsan.cfg`
-  from the directory of the program, as found from the command it was started
-  with. If you start it without a path, that is the current directory. A
-  config named with `-c` must exist. The default config is optional.
-- `directory ...` lists the directories to process. The default is the
-  current directory.
+Without `-c`, pktsan reads `pktsan.cfg` from the directory the program was
+started from, whatever the current directory is. For example,
+`c:\ftn\pktsan\pktsan.exe` started in `d:\temp` reads
+`c:\ftn\pktsan\pktsan.cfg`. If the program is started without a path (found
+through `PATH`), the config is looked for in the current directory. A config
+named with `-c` must exist. The default config is optional; without it, the
+log goes to the console at the `info` level. Any other argument is an error.
 
-The exit code is 0 on success. It is 1 if the config is wrong, if the log
-cannot be opened, or if any packet could not be processed. If the config is
-wrong or the log cannot be opened, pktsan processes no packets at all. Any
-packet pktsan could not process is left unchanged.
+The exit code is 0 on success. It is 1 if an argument or the config is wrong,
+if the log cannot be opened, or if any packet could not be processed. If an
+argument or the config is wrong or the log cannot be opened, pktsan
+processes no packets at all. Any packet pktsan could not process is left
+unchanged.
 
 ## Configuration
 
@@ -108,9 +107,9 @@ Lines starting with `;` or `#` are comments. Keywords are case-insensitive.
 Example log:
 
 ```
-2026-09-26 19:42:46 [warn] truncated subject to 71 bytes (was 200) in message #32 in c:\ftn\inbound\1234abcd.pkt
-2026-09-26 19:42:46 [info] processed c:\ftn\inbound\1234abcd.pkt: 40 messages, 1 fields truncated
-2026-09-26 19:42:46 [info] processed c:\ftn\inbound\5678ef01.pkt: 12 messages, nothing truncated
+2026-09-26 19:42:46 [warn] truncated subject to 71 bytes (was 200) in message #32 in 1234abcd.pkt
+2026-09-26 19:42:46 [info] processed 1234abcd.pkt: 40 messages, 1 fields truncated
+2026-09-26 19:42:46 [info] processed 5678ef01.pkt: 12 messages, nothing truncated
 ```
 
 ## Building
@@ -138,6 +137,6 @@ reference implementation. They cover:
 - message order;
 - broken and cut packets;
 - file name matching;
-- logging and configuration;
+- command line, logging and configuration;
 - recovery after an interrupted run;
 - a fuzzer that runs 1500 random and damaged packets.
