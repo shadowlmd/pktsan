@@ -124,9 +124,9 @@ Every file name in the log comes with its full path. Example log:
 2026-09-26 19:42:46 [info] pktsan 1.0 started in c:\ftn\inbound\temp
 2026-09-26 19:42:46 [warn] truncated subject to 71 bytes (was 200) in message #32 in c:\ftn\inbound\temp\1234abcd.pkt
 2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\1234abcd.pkt: 40 messages, 1 fields truncated
-2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\5678ef01.pkt: 12 messages, nothing truncated
+2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\5678ef01.pkt: 12 messages, no changes needed
 2026-09-26 19:42:46 [warn] c:\ftn\inbound\temp\6ab6fb20.pkt: incomplete packet terminator after message #1 (1 byte at offset 662), kept as is
-2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\6ab6fb20.pkt: 1 messages, nothing truncated
+2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\6ab6fb20.pkt: 1 messages, no changes needed
 2026-09-26 19:42:46 [err] c:\ftn\inbound\temp\9abc0123.pkt is not a packet: only 12 bytes, shorter than a packet header, skipped
 ```
 

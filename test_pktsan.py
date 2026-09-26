@@ -203,7 +203,7 @@ def check_packet(env, name, data, r=None):
         assert info == []
     elif "LogLevel info" in open(env.cfg).read():
         assert info == ["processed %s: %d messages, %s" % (
-            name, n, "%d fields truncated" % len(tr) if tr else "nothing truncated")], info
+            name, n, "%d fields truncated" % len(tr) if tr else "no changes needed")], info
     assert not [f for f in env.files() if f.lower().endswith("$")], env.files()
     return n, tr
 
@@ -224,7 +224,7 @@ def no_changes():
     data = packet([pmsg(), pmsg(to=b"A" * 35, frm=b"B" * 35, subj=b"C" * 71)])
     n, tr = check_packet(env, "0001.pkt", data)
     assert n == 2 and tr == []
-    assert env.loglines() == [("info", "processed 0001.pkt: 2 messages, nothing truncated")]
+    assert env.loglines() == [("info", "processed 0001.pkt: 2 messages, no changes needed")]
     env.cleanup()
 
 
@@ -353,7 +353,7 @@ def short_files():
     # a valid empty packet is fine
     env = Env()
     check_packet(env, "s.pkt", packet([]))
-    assert env.loglines() == [("info", "processed s.pkt: 0 messages, nothing truncated")]
+    assert env.loglines() == [("info", "processed s.pkt: 0 messages, no changes needed")]
     env.cleanup()
     # garbage right after the header
     env = Env()
@@ -416,7 +416,7 @@ def start_line():
     assert env.run().returncode == 0
     assert env.loglines(started=True) == [
         ("info", "pktsan 1.0 started in %s" % os.path.realpath(env.dir)),
-        ("info", "processed 1.pkt: 1 messages, nothing truncated")]
+        ("info", "processed 1.pkt: 1 messages, no changes needed")]
     # logged even when there is nothing to process
     os.remove(os.path.join(env.dir, "1.pkt"))
     os.remove(env.log)
@@ -503,7 +503,7 @@ def default_config_next_to_program():
     # no config at all: defaults, log to stdout
     os.remove(os.path.join(bindir, "pktsan.cfg"))
     r = subprocess.run([exe], cwd=env.dir, capture_output=True)
-    assert r.returncode == 0 and ("[info] processed %s/1.pkt: 1 messages, nothing truncated"
+    assert r.returncode == 0 and ("[info] processed %s/1.pkt: 1 messages, no changes needed"
                                   % os.path.realpath(env.dir)).encode() in r.stdout, r
     env.cleanup()
 
@@ -564,7 +564,7 @@ def read_only_directory():
     assert env.get("1.pkt") == data and env.files() == ["1.pkt", "2.pkt"]
     assert [l for l in env.loglines() if l[0] != "info"] == [
         ("err", "can't write 1.tr$: Permission denied, 1.pkt skipped")]
-    assert [l[1] for l in env.loglines("info")] == ["processed 2.pkt: 1 messages, nothing truncated"]
+    assert [l[1] for l in env.loglines("info")] == ["processed 2.pkt: 1 messages, no changes needed"]
     env.cleanup()
 
 
@@ -611,7 +611,7 @@ def idempotent():
     assert len([w for w in warns if "incomplete packet terminator" in w]) == 2
     assert [l[1] for l in env.loglines("info")] == [
         "processed 1.pkt: 3 messages, 9 fields truncated",
-        "processed 1.pkt: 3 messages, nothing truncated"]
+        "processed 1.pkt: 3 messages, no changes needed"]
     env.cleanup()
 
 

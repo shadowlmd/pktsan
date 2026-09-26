@@ -511,7 +511,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 
     if(TrCount == 0)
     {
-        Log(LOG_INFO, "processed %s: %ld messages, nothing truncated", LPath,
+        Log(LOG_INFO, "processed %s: %ld messages, no changes needed", LPath,
             Msgs);
         Rc = 0;
         goto done;
