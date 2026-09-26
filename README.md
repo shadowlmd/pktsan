@@ -1,77 +1,63 @@
 # PKT Sanitizer (pktsan)
 
-pktsan shortens overlong names and subjects in FidoNet packets (`*.pkt`) so
-that a tosser can process them.
+Truncates overlong `toUserName`, `fromUserName` and `subject` in FTS-0001
+packets (`*.pkt`).
 
-## Why
+FTS-0001 limits these null-terminated strings to 36, 36 and 72 bytes
+including the null. Some software writes longer strings, and tossers that
+read the fields into fixed-size buffers, such as FastEcho, break on them.
+pktsan runs before the tosser and truncates the strings.
 
-FTS-0001 defines three strings in the header of a packed message:
-`toUserName`, `fromUserName` and `subject`. Each one is null-terminated and
-can hold at most 36, 36 and 72 bytes including the null. That leaves 35, 35
-and 71 characters of text. Some software writes longer strings anyway.
+## Processing
 
-Many tossers read these fields as fixed-size buffers. When a string is too
-long, its tail is read as the next field, the rest of the message header
-shifts, and the tosser breaks. RNtrack did this until RNtrack-AF 2.4.0: it
-lost the message text and dropped the rest of the packet.
+- Processes every `*.pkt` file (extension in any case) in the current
+  directory.
+- Truncates the strings to 35, 35 and 71 bytes in every message whose
+  header can be read, including a last message cut off by the end of the
+  file.
+- Changes nothing else. Data that does not parse as packed messages
+  (unknown message type, missing or short packet terminator, data after the
+  last message) is kept byte for byte.
+- Skips a file that is not a packet: shorter than a packet header (58
+  bytes), or no packed messages after the header.
 
-FastEcho fails on such packets just as hard. Its source code is closed, so it
-cannot be fixed. pktsan works around the problem: it runs after FastEcho
-unpacks the incoming bundles and before FastEcho tosses the packets. It
-truncates the overlong strings, and FastEcho then receives valid packets.
+A packet that needs no changes is not written to. A packet that needs
+changes is written to `name.tr$`, then `name.pkt` is deleted, `name.tr$` is
+renamed to `name.pkt` and the original file time is restored.
 
-## What it does
+After an interrupted run, the next run:
 
-- It processes every `*.pkt` file in the current directory. The `.pkt`
-  extension is matched in any case.
-- It reads `toUserName`, `fromUserName` and `subject` up to their terminating
-  null, as FTS-0001 requires. It truncates them to 35, 35 and 71 bytes and
-  logs a warning for each truncation.
-- It truncates these strings in every message it can read. That includes a
-  last message cut off by the end of the file: its complete strings are
-  truncated, and its unterminated part is copied as is.
-- It changes nothing else. The packet header, the message headers, the
-  message texts and the order of messages stay exactly as they were. Any data
-  that does not parse as packed messages is copied as is, byte for byte. That
-  includes an unknown message type, a missing or short packet terminator, and
-  garbage after the last message. pktsan logs a warning about such data but
-  still processes all messages before it.
-- It skips a packet entirely only when the file is not a packet at all: it
-  is shorter than a packet header, or no packed message follows the header.
-  It also skips a packet it cannot read or write. Each of these cases is
-  logged as an error.
-- It does not validate packets. Checking signatures, passwords and addresses
-  is the tosser's job.
+- deletes `name.tr$` if `name.pkt` exists, and processes `name.pkt` again;
+- renames `name.tr$` to `name.pkt` if `name.pkt` does not exist.
 
-A packet that needs no changes is only read. pktsan does not rewrite it,
-rename it or change its timestamp.
+## FastEcho
 
-A packet that needs changes goes through these steps:
-
-1. pktsan writes the fixed packet to `name.tr$` in the same directory.
-2. It deletes `name.pkt`.
-3. It renames `name.tr$` to `name.pkt` and restores the original file time.
-
-If a run is interrupted, the next run cleans up after it:
-
-- If `name.tr$` exists next to `name.pkt`, the fixed copy was not finished.
-  pktsan deletes `name.tr$`, and the untouched packet is processed again.
-- If `name.tr$` exists without `name.pkt`, the fixed copy was complete.
-  pktsan renames it back to `name.pkt`.
-
-## Using it with FastEcho
-
-In FastEcho setup, open the "External programs (After Unpack)" field
-(section 5.4.12.1 of the FastEcho manual) and enter pktsan with its full
-path:
+FastEcho runs the "External programs (After Unpack)" command (section
+5.4.12.1 of the manual) during `FastEcho TOSS` before tossing any packets,
+including when no bundles were unpacked. It does not change the current
+directory, so the command must be a batch file that runs pktsan in the
+inbound, the unpack directory and the local inbound:
 
 ```
+c:\ftn\pktsan\fastecho.bat
+```
+
+```bat
+@echo off
+
+c:
+
+cd c:\ftn\inbound
+c:\ftn\pktsan\pktsan.exe
+
+cd c:\ftn\inbound\temp
+c:\ftn\pktsan\pktsan.exe
+
+cd c:\ftn\inbound\local
 c:\ftn\pktsan\pktsan.exe
 ```
 
-FastEcho runs this command during `FastEcho TOSS`, after it has unpacked the
-incoming mail bundles. pktsan processes the packets in the directory FastEcho
-starts it in.
+Use the directories and the drive from your FastEcho setup.
 
 ## Command line
 
@@ -79,20 +65,15 @@ starts it in.
 pktsan [-c config]
 ```
 
-Without `-c`, pktsan reads `pktsan.cfg` from the directory the program was
-started from, whatever the current directory is. For example,
-`c:\ftn\pktsan\pktsan.exe` started in `d:\temp` reads
-`c:\ftn\pktsan\pktsan.cfg`. If the program is started without a path (found
-through `PATH`), the config is looked for in the current directory. A config
-named with `-c` must exist. The default config is optional; without it, the
-log goes to the console at the `info` level. Any other argument is an error.
+The default config is `pktsan.cfg` in the program directory, or in the
+current directory if the program was started without a path. It is
+optional. A config given with `-c` must exist.
 
-The exit code is 0 on success. It is 1 if an argument or the config is wrong,
-if the log cannot be opened, or if any error was logged: a packet was
-skipped because it is not a packet at all, or a file could not be read or
-written. If an
-argument or the config is wrong or the log cannot be opened, pktsan
-processes no packets at all. A skipped packet is left unchanged.
+Exit code:
+
+- 0: no errors;
+- 1: bad argument, bad config or log can't be opened (no packets are
+  processed), or an error was logged.
 
 ## Configuration
 
@@ -102,23 +83,24 @@ LogFile c:\ftn\log\pktsan.log
 LogLevel info
 ```
 
-- `LogFile` is the file pktsan appends its log to. Without it, the log goes
-  to the console. You may put the path in double quotes.
-- `LogLevel` takes one of two values:
-  - `info` logs the directory pktsan started in, one line for every
-    processed packet, and all warnings and errors.
-  - `warn` logs warnings and errors only.
-
-  A warning (`[warn]`) is a problem pktsan fixed or worked around; the packet
-  is still processed. Examples are a truncated field, a cut off message,
-  unparsable data after the last message, and a leftover temporary file.
-  An error (`[err]`) means a packet or a file was skipped: it is not a
-  packet at all, or it could not be read or written. Errors are always
-  logged.
+- `LogFile`: log file, appended to. Default: console. May be in double
+  quotes.
+- `LogLevel`:
+  - `info` (default): start directory, one line per packet, warnings,
+    errors;
+  - `warn`: warnings and errors.
 
 Lines starting with `;` or `#` are comments. Keywords are case-insensitive.
 
-Every file name in the log comes with its full path. Example log:
+## Log
+
+- `[info]`: start directory and the result for each packet.
+- `[warn]`: a problem in a processed packet: truncated field, cut off
+  message, unparsable data after the last message; also leftover temporary
+  files.
+- `[err]`: a file was skipped: not a packet, or a read or write error.
+
+File names are logged with the full path.
 
 ```
 2026-09-26 19:42:46 [info] pktsan 1.0 started in c:\ftn\inbound\temp
@@ -132,8 +114,8 @@ Every file name in the log comes with its full path. Example log:
 
 ## Building
 
-pktsan is one C file. It uses only the standard C library, plus `dirent.h`
-and `utime()`, which MinGW, DJGPP and the OS/2 compilers all provide.
+One C file; needs the standard C library, `dirent.h`, `utime()` and
+`getcwd()`.
 
 ```
 gcc -O2 -static-libgcc -o pktsan.exe pktsan.c     (MinGW, Win32)
@@ -146,15 +128,7 @@ gcc -O2 -o pktsan pktsan.c                        (Linux)
 make test
 ```
 
-The tests run on Linux and need Python 3. They build pktsan twice: a normal
-build and one with AddressSanitizer and UndefinedBehaviorSanitizer. Every test
-runs against both builds. The tests compare the output with an independent
-reference implementation. They cover:
-
-- field boundaries;
-- message order;
-- broken and cut packets;
-- file name matching;
-- command line, logging and configuration;
-- recovery after an interrupted run;
-- a fuzzer that runs 1500 random and damaged packets.
+Linux, Python 3. Runs every test against a normal build and an
+AddressSanitizer/UndefinedBehaviorSanitizer build, comparing the output with
+a reference implementation. Includes a fuzzer (1500 random and damaged
+packets).
