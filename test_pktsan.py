@@ -36,47 +36,63 @@ def packet(msgs, tail=b"\0\0", seed=0):
     return pkt_header(seed) + b"".join(msgs) + tail
 
 
-def reference_tail(data):
-    """Offset of the data after the last complete message."""
-    p = 58
-    while len(data) - p >= 34 and data[p:p + 2] == b"\x02\x00":
-        q = p + 34
-        for _ in range(4):
-            z = data.find(b"\0", q)
-            if z < 0:
-                return p
-            q = z + 1
-        p = q
-    return p
-
-
 def reference(data):
-    """Independent model: returns (output, msgs, [(msg, field, len)])."""
+    """Independent model: returns (output, msgs, [(msg, field, len)], tail).
+
+    msgs counts a message cut off by the end of the file too; tail is the
+    offset of the data after the last complete message."""
     if len(data) < 58:
-        return data, 0, []
+        return data, 0, [], len(data)
     out = bytearray(data[:58])
     p, n, tr = 58, 0, []
-    while len(data) - p >= 34 and data[p:p + 2] == b"\x02\x00":
+    while data[p:p + 2] == b"\x02\x00":
+        n += 1
+        if len(data) - p < 34:
+            break
         q = p + 34
-        fields = []
-        for _ in range(4):
+        out += data[p:q]
+        for i in range(4):
             z = data.find(b"\0", q)
             if z < 0:
-                break
-            fields.append(data[q:z])
-            q = z + 1
-        if len(fields) < 4:
-            break
-        n += 1
-        out += data[p:p + 34]
-        for i, f in enumerate(fields):
+                out += data[q:]
+                return bytes(out), n, tr, p
+            f = data[q:z]
             if i < 3 and len(f) > LIMITS[i] - 1:
                 tr.append((n, i, len(f)))
                 f = f[:LIMITS[i] - 1]
             out += f + b"\0"
+            q = z + 1
         p = q
     out += data[p:]
-    return bytes(out), n, tr
+    return bytes(out), n, tr, p
+
+
+def expected_problem(data):
+    """None for a proper packet, else ("err" | "warn", start of message)."""
+    _, n, _, tail = reference(data)
+    rest = data[tail:]
+    if len(data) < 58:
+        return ("err", "%s is not a packet: only %d bytes" % ("{0}", len(data)))
+    if rest == b"\0\0":
+        return None
+    if n == 0:
+        return ("err", "{0} is not a packet: no packed messages after the packet "
+                "header (%d bytes of unknown data at offset %d), skipped" % (len(rest), tail))
+    if rest[:2] == b"\x02\x00":
+        return ("warn", "{0}: message #%d (offset %d) is cut off by the end of the "
+                "file, its unterminated part is kept as is" % (n, tail))
+    if rest == b"":
+        return ("warn", "{0}: no packet terminator, the file ends right after "
+                "message #%d" % n)
+    if rest == b"\0":
+        return ("warn", "{0}: incomplete packet terminator after message #%d "
+                "(1 byte at offset %d), kept as is" % (n, tail))
+    if rest[:2] == b"\0\0":
+        return ("warn", "{0}: %d bytes of unknown data after the packet terminator "
+                "(offset %d), kept as is" % (len(rest) - 2, tail + 2))
+    return ("warn", "{0}: unknown data instead of a packet terminator after "
+            "message #%d (%d bytes at offset %d), kept as is without parsing"
+            % (n, len(rest), tail))
 
 
 # ---------------------------------------------------------------- harness
@@ -125,7 +141,7 @@ class Env:
         for line in self.logtext().splitlines():
             m = re.match(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d \[(\w+)\] (.*)$", line)
             assert m, "bad log line: %r" % line
-            assert m.group(1) == "warn" or m.group(2).startswith("processed "), line
+            assert (m.group(1) == "info") == m.group(2).startswith("processed "), line
             if level is None or m.group(1) == level:
                 res.append((m.group(1), m.group(2)))
         return res
@@ -150,23 +166,33 @@ def check_packet(env, name, data, r=None):
     ino = os.stat(path).st_ino
     if r is None:
         r = env.run()
+    prob = expected_problem(data)
+    skipped = prob is not None and prob[0] == "err"
     assert r.returncode == 0, r
-    exp, n, tr = reference(data)
+    exp, n, tr, _ = reference(data)
     got = env.get(name)
+    if skipped:
+        assert got == data and tr == []
     assert got == exp, "output differs from reference"
     st = os.stat(path)
     assert st.st_mtime == 1000000000, "mtime not preserved"
     if not tr:
         assert st.st_ino == ino, "unchanged packet was rewritten"
-    assert [l[1] for l in env.loglines("warn")
-            if l[1].startswith("truncated ")] == warn_lines(tr, name)
-    other = [l[1] for l in env.loglines("warn") if not l[1].startswith("truncated ")]
-    tail_ok = len(data) >= 58 and len(data) - reference_tail(data) == 2 and data.endswith(b"\0\0")
-    assert bool(other) == (not tail_ok), other
+    lines = env.loglines()
+    assert [l[1] for l in lines if l[1].startswith("truncated ")] == warn_lines(tr, name)
+    other = [l for l in lines if l[0] != "info" and not l[1].startswith("truncated ")]
+    if prob is None:
+        assert other == [], other
+    else:
+        assert len(other) == 1 and other[0][0] == prob[0] and \
+            other[0][1].startswith(prob[1].format(name)), (other, prob)
+    info = [l[1] for l in lines if l[0] == "info"]
+    if skipped:
+        assert info == []
+    elif "LogLevel info" in open(env.cfg).read():
+        assert info == ["processed %s: %d messages, %s" % (
+            name, n, "%d fields truncated" % len(tr) if tr else "nothing truncated")], info
     assert not [f for f in env.files() if f.lower().endswith("$")], env.files()
-    # every packet is mentioned in the log at the info level
-    if "LogLevel info" in open(env.cfg).read():
-        assert [l for l in env.loglines() if name in l[1]], env.logtext()
     return n, tr
 
 
@@ -260,15 +286,10 @@ def big_text():
 def terminators():
     long = pmsg(to=b"L" * 50)
     for tail in (b"\0\0", b"\0", b"", b"\0\0\0\0", b"\0\0garbage",
-                 b"\x01\x00junk", b"\x02", b"\x02\x00", b"\x02\x00" + b"x" * 40):
+                 b"\x01\x00junk", b"\x02", b"\x00\x01", b"\xff"):
         env = Env()
         n, tr = check_packet(env, "t.pkt", packet([pmsg(), long], tail=tail))
         assert n == 2 and tr == [(2, 0, 50)], tail
-        warns = [l[1] for l in env.loglines("warn")]
-        if tail == b"\0\0":
-            assert not [w for w in warns if "terminator" in w]
-        else:
-            assert [w for w in warns if "not a packet terminator" in w], warns
         env.cleanup()
 
 
@@ -276,12 +297,18 @@ def terminators():
 def incomplete_last_message():
     base = packet([pmsg(frm=b"F" * 60)], tail=b"")
     last = pmsg(to=b"T" * 80, frm=b"F" * 80, subj=b"S" * 80, text=b"text")
-    for cut in range(0, len(last)):
+    for cut in range(2, len(last)):
         env = Env()
         n, tr = check_packet(env, "i.pkt", base + last[:cut])
-        # the incomplete message is copied as is, even with long fields
-        assert n == 1 and tr == [(1, 1, 60)], cut
+        # complete strings of a cut off message are truncated too
+        done = [i for i, end in enumerate((34 + 81, 34 + 162, 34 + 243)) if cut >= end]
+        assert n == 2 and tr == [(1, 1, 60)] + [(2, i, 80) for i in done], cut
         env.cleanup()
+    # the only message of a packet is cut off
+    env = Env()
+    n, tr = check_packet(env, "i.pkt", pkt_header() + pmsg(subj=b"S" * 80)[:-1])
+    assert n == 1 and tr == [(1, 2, 80)]
+    env.cleanup()
 
 
 @test
@@ -296,16 +323,20 @@ def unknown_message_type_stops_parsing():
 
 @test
 def short_files():
-    for size in (0, 1, 2, 57, 58, 59, 60, 91, 92):
+    full = packet([pmsg(to=b"Z" * 50)])
+    for size in (0, 1, 2, 57, 58, 59, 60, 91, 92, 92 + 50, 92 + 51):
         env = Env()
-        data = (packet([pmsg(to=b"Z" * 50)]))[:size]
-        n, tr = check_packet(env, "s.pkt", data)
-        assert tr == []
+        n, tr = check_packet(env, "s.pkt", full[:size])
+        assert tr == ([(1, 0, 50)] if size == 92 + 51 else [])
         if size < 58:
-            assert [l for l in env.loglines("warn") if "shorter than a packet header" in l[1]]
+            assert env.loglines() == [("err", "s.pkt is not a packet: only %d bytes, "
+                                       "shorter than a packet header, skipped" % size)]
+        elif size < 60:
+            assert env.loglines()[0][0] == "err", size
         else:
-            assert env.loglines() == [("warn", "s.pkt: no packed messages after "
-                                       "the packet header, left unchanged")], size
+            assert env.loglines()[0] == ("warn", "s.pkt: message #1 (offset 58) is cut "
+                                         "off by the end of the file, its unterminated "
+                                         "part is kept as is"), size
         env.cleanup()
     # a valid empty packet is fine
     env = Env()
@@ -315,8 +346,9 @@ def short_files():
     # garbage right after the header
     env = Env()
     check_packet(env, "s.pkt", packet([], tail=b"\x01\x00" + b"x" * 100))
-    assert env.loglines() == [("warn", "s.pkt: no packed messages after "
-                               "the packet header, left unchanged")]
+    assert env.loglines() == [("err", "s.pkt is not a packet: no packed messages after "
+                               "the packet header (102 bytes of unknown data at offset "
+                               "58), skipped")]
     env.cleanup()
 
 
@@ -349,7 +381,7 @@ def log_level_warn():
     assert env.run().returncode == 0
     assert env.loglines() == [
         ("warn", "truncated toUserName to 35 bytes (was 36) in message #1 in 2.pkt"),
-        ("warn", "3.pkt: 1 bytes after message #1 (offset %d) are not a packet terminator, left unchanged" % (58 + len(pmsg())))]
+        ("warn", "3.pkt: incomplete packet terminator after message #1 (1 byte at offset %d), kept as is" % (58 + len(pmsg())))]
     env.cleanup()
 
 
@@ -494,8 +526,8 @@ def read_only_directory():
     os.chmod(env.dir, 0o755)
     assert r.returncode == 1
     assert env.get("1.pkt") == data and env.files() == ["1.pkt", "2.pkt"]
-    assert [l[1] for l in env.loglines("warn")] == [
-        "can't write 1.tr$: Permission denied, 1.pkt left unchanged"]
+    assert [l for l in env.loglines() if l[0] != "info"] == [
+        ("err", "can't write 1.tr$: Permission denied, 1.pkt skipped")]
     assert [l[1] for l in env.loglines("info")] == ["processed 2.pkt: 1 messages, nothing truncated"]
     env.cleanup()
 
@@ -506,8 +538,8 @@ def broken_symlink_is_logged():
     os.symlink("nowhere", os.path.join(env.dir, "1.pkt"))
     r = env.run()
     assert r.returncode == 1
-    assert [l[1] for l in env.loglines()] == [
-        "can't stat 1.pkt: No such file or directory"], env.logtext()
+    assert env.loglines() == [
+        ("err", "can't stat 1.pkt: No such file or directory, skipped")], env.logtext()
     env.cleanup()
 
 
@@ -523,7 +555,7 @@ def unreadable_packet_does_not_stop_others():
     r = env.run()
     os.chmod(p1, 0o644)
     assert r.returncode == 1
-    assert [l for l in env.loglines("warn") if l[1].startswith("can't read 1.pkt")]
+    assert [l for l in env.loglines("err") if l[1].startswith("can't read 1.pkt")]
     assert env.get("2.pkt") == reference(data2)[0]
     env.cleanup()
 
@@ -539,7 +571,7 @@ def idempotent():
     assert env.get("1.pkt") == first == reference(data)[0]
     warns = [l[1] for l in env.loglines("warn")]
     assert len([w for w in warns if w.startswith("truncated ")]) == 9
-    assert len([w for w in warns if "not a packet terminator" in w]) == 2
+    assert len([w for w in warns if "incomplete packet terminator" in w]) == 2
     assert [l[1] for l in env.loglines("info")] == [
         "processed 1.pkt: 3 messages, 9 fields truncated",
         "processed 1.pkt: 3 messages, nothing truncated"]

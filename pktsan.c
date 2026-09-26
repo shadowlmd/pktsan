@@ -9,7 +9,9 @@
  *   n bytes including the null.
  *
  * Only these three strings are changed; everything else, including data
- * that can not be parsed as packed messages, is kept byte for byte.
+ * that can not be parsed as packed messages, is kept byte for byte. The
+ * strings are truncated in every message whose header can be read, even if
+ * the rest of the message is cut off by the end of the file.
  * A packet is rewritten only when something has to be truncated: the new
  * packet is written to name.tr$, then name.pkt is deleted and name.tr$ is
  * renamed to name.pkt. A name.tr$ left by an interrupted run is deleted if
@@ -38,8 +40,9 @@
 #define PKT_HDR_SIZE 58   /* packet header */
 #define MSG_HDR_SIZE 34   /* messageType .. DateTime */
 
-#define LOG_WARN  0   /* any problem, fixed or not */
-#define LOG_INFO  1   /* processed packets */
+#define LOG_ERR   0   /* a packet or a file is skipped */
+#define LOG_WARN  1   /* a problem pktsan fixed or worked around */
+#define LOG_INFO  2   /* processed packets */
 
 static FILE * LogFh    = NULL;
 static int    LogLevel = LOG_INFO;
@@ -58,7 +61,7 @@ typedef struct
 
 static void Log(int Level, const char * Fmt, ...)
 {
-    static const char * Names[] = { "warn", "info" };
+    static const char * Names[] = { "err", "warn", "info" };
     va_list ap;
     time_t t;
     char Stamp[32];
@@ -252,9 +255,11 @@ static int ReadConfig(const char * Path, int Required, char ** LogFile)
 
 /*
  * Copies packet In to Out (at most InLen bytes) truncating too long strings.
- * Truncations are stored to *Tr (allocated), their number to *TrCount,
- * the offset of the data after the last complete message to *Tail.
- * Returns the number of complete messages.
+ * Truncations are stored to *Tr (allocated), their number to *TrCount.
+ * A message cut off by the end of the file is counted too: its complete
+ * strings are truncated and the rest is copied as is. *Tail is the offset
+ * of the data after the last complete message (the start of the cut off
+ * message, if any). Returns the number of messages.
  */
 static long TrimPacket(const unsigned char * In, long InLen,
                        unsigned char * Out, long * OutLen,
@@ -270,13 +275,20 @@ static long TrimPacket(const unsigned char * In, long InLen,
         memcpy(Out, In, PKT_HDR_SIZE);
         p = o = PKT_HDR_SIZE;
 
-        while(InLen - p >= MSG_HDR_SIZE && In[p] == 2 && In[p + 1] == 0)
+        while(InLen - p >= 2 && In[p] == 2 && In[p + 1] == 0)
         {
             long Start[4], Len[4];
             long q = p + MSG_HDR_SIZE;
-            int i;
+            int i, n;
 
-            for(i = 0; i < 4; i++)
+            Msgs++;
+
+            if(InLen - p < MSG_HDR_SIZE)
+            {
+                break; /* cut off in the message header */
+            }
+
+            for(n = 0; n < 4; n++)
             {
                 const unsigned char * z =
                     (const unsigned char *)memchr(In + q, 0, InLen - q);
@@ -286,25 +298,19 @@ static long TrimPacket(const unsigned char * In, long InLen,
                     break;
                 }
 
-                Start[i] = q;
-                Len[i]   = (long)(z - In) - q;
+                Start[n] = q;
+                Len[n]   = (long)(z - In) - q;
                 q        = (long)(z - In) + 1;
             }
 
-            if(i < 4)
-            {
-                break; /* incomplete message, keep it as is */
-            }
-
-            Msgs++;
             memcpy(Out + o, In + p, MSG_HDR_SIZE);
             o += MSG_HDR_SIZE;
 
-            for(i = 0; i < 4; i++)
+            for(i = 0; i < n; i++)
             {
-                long n = Len[i];
+                long l = Len[i];
 
-                if(i < 3 && n > FieldSize[i] - 1)
+                if(i < 3 && l > FieldSize[i] - 1)
                 {
                     if(*TrCount == TrAlloc)
                     {
@@ -324,14 +330,23 @@ static long TrimPacket(const unsigned char * In, long InLen,
 
                     (*Tr)[*TrCount].msg   = Msgs;
                     (*Tr)[*TrCount].field = i;
-                    (*Tr)[*TrCount].len   = n;
+                    (*Tr)[*TrCount].len   = l;
                     (*TrCount)++;
-                    n = FieldSize[i] - 1;
+                    l = FieldSize[i] - 1;
                 }
 
-                memcpy(Out + o, In + Start[i], n);
-                o += n;
+                memcpy(Out + o, In + Start[i], l);
+                o += l;
                 Out[o++] = 0;
+            }
+
+            if(n < 4)
+            {
+                /* cut off: the unterminated rest is copied as is */
+                memcpy(Out + o, In + q, InLen - q);
+                *OutLen = o + (InLen - q);
+                *Tail   = p;
+                return Msgs;
             }
 
             p = q;
@@ -388,7 +403,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
     unsigned char * In;
     unsigned char * Out;
     Trunc * Tr = NULL;
-    long OutLen, TrCount, Msgs, Tail, i;
+    long OutLen, TrCount, Msgs, Tail, Rest, i;
     struct utimbuf ut;
     int Rc = 1;
 
@@ -396,7 +411,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 
     if(stat(Path, &st) != 0)
     {
-        Log(LOG_WARN, "can't stat %s: %s", Path, strerror(errno));
+        Log(LOG_ERR, "can't stat %s: %s, skipped", Path, strerror(errno));
         return 1;
     }
 
@@ -405,7 +420,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 
     if(In == NULL || Out == NULL)
     {
-        Log(LOG_WARN, "not enough memory for %s (%ld bytes), left unchanged",
+        Log(LOG_ERR, "not enough memory for %s (%ld bytes), skipped",
             Path, (long)st.st_size);
         goto done;
     }
@@ -414,34 +429,59 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 
     if(!ReadPkt(Path, (long)st.st_size, In))
     {
-        Log(LOG_WARN, "can't read %s: %s, left unchanged", Path,
+        Log(LOG_ERR, "can't read %s: %s, skipped", Path,
             errno ? strerror(errno) : "size changed while reading");
         goto done;
     }
 
     if(st.st_size < PKT_HDR_SIZE)
     {
-        Log(LOG_WARN, "%s is shorter than a packet header (%ld bytes), "
-            "left unchanged", Path, (long)st.st_size);
+        Log(LOG_ERR, "%s is not a packet: only %ld bytes, shorter than a packet "
+            "header, skipped", Path, (long)st.st_size);
         Rc = 0;
         goto done;
     }
 
     Msgs = TrimPacket(In, (long)st.st_size, Out, &OutLen, &Tr, &TrCount, &Tail);
+    Rest = (long)st.st_size - Tail;
 
-    if(!(st.st_size - Tail == 2 && In[Tail] == 0 && In[Tail + 1] == 0))
+    if(Rest == 2 && In[Tail] == 0 && In[Tail + 1] == 0)
     {
-        if(Msgs == 0)
-        {
-            Log(LOG_WARN, "%s: no packed messages after the packet header, "
-                "left unchanged", Path);
-            Rc = 0;
-            goto done;
-        }
-
-        Log(LOG_WARN, "%s: %ld bytes after message #%ld (offset %ld) are not "
-            "a packet terminator, left unchanged", Path,
-            (long)st.st_size - Tail, Msgs, Tail);
+        /* a proper packet terminator */
+    }
+    else if(Msgs == 0)
+    {
+        Log(LOG_ERR, "%s is not a packet: no packed messages after the packet "
+            "header (%ld bytes of unknown data at offset %ld), skipped", Path,
+            Rest, Tail);
+        Rc = 0;
+        goto done;
+    }
+    else if(Rest >= 2 && In[Tail] == 2 && In[Tail + 1] == 0)
+    {
+        Log(LOG_WARN, "%s: message #%ld (offset %ld) is cut off by the end of "
+            "the file, its unterminated part is kept as is", Path, Msgs, Tail);
+    }
+    else if(Rest == 0)
+    {
+        Log(LOG_WARN, "%s: no packet terminator, the file ends right after "
+            "message #%ld", Path, Msgs);
+    }
+    else if(Rest == 1 && In[Tail] == 0)
+    {
+        Log(LOG_WARN, "%s: incomplete packet terminator after message #%ld "
+            "(1 byte at offset %ld), kept as is", Path, Msgs, Tail);
+    }
+    else if(Rest > 2 && In[Tail] == 0 && In[Tail + 1] == 0)
+    {
+        Log(LOG_WARN, "%s: %ld bytes of unknown data after the packet "
+            "terminator (offset %ld), kept as is", Path, Rest - 2, Tail + 2);
+    }
+    else
+    {
+        Log(LOG_WARN, "%s: unknown data instead of a packet terminator after "
+            "message #%ld (%ld bytes at offset %ld), kept as is without "
+            "parsing", Path, Msgs, Rest, Tail);
     }
 
     if(TrCount == 0)
@@ -456,7 +496,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 
     if(!WritePkt(Tmp, Out, OutLen))
     {
-        Log(LOG_WARN, "can't write %s: %s, %s left unchanged", Tmp,
+        Log(LOG_ERR, "can't write %s: %s, %s skipped", Tmp,
             errno ? strerror(errno) : "short write", Path);
         remove(Tmp);
         goto done;
@@ -466,8 +506,8 @@ static int ProcessPacket(const char * Path, const char * Tmp)
     if(stat(Path, &st2) != 0 || st2.st_size != st.st_size ||
        st2.st_mtime != st.st_mtime)
     {
-        Log(LOG_WARN, "%s was changed while processing, left unchanged",
-            Path);
+        Log(LOG_ERR, "%s was changed by another program while processing, "
+            "skipped", Path);
         remove(Tmp);
         goto done;
     }
@@ -476,7 +516,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 
     if(remove(Path) != 0)
     {
-        Log(LOG_WARN, "can't delete %s: %s, left unchanged", Path,
+        Log(LOG_ERR, "can't delete %s: %s, skipped", Path,
             strerror(errno));
         remove(Tmp);
         goto done;
@@ -485,8 +525,9 @@ static int ProcessPacket(const char * Path, const char * Tmp)
     if(rename(Tmp, Path) != 0)
     {
         /* Tmp is complete: it is renamed back on the next run */
-        Log(LOG_WARN, "can't rename %s to %s: %s", Tmp, Path,
-            strerror(errno));
+        Log(LOG_ERR, "can't rename %s to %s: %s, the processed packet is "
+            "restored from %s on the next run", Tmp, Path, strerror(errno),
+            Tmp);
         goto done;
     }
 
@@ -571,7 +612,7 @@ static int ProcessDir(void)
 
     if(d == NULL)
     {
-        Log(LOG_WARN, "can't read the current directory: %s", strerror(errno));
+        Log(LOG_ERR, "can't read the current directory: %s", strerror(errno));
         return 1;
     }
 
@@ -617,7 +658,7 @@ static int ProcessDir(void)
             }
             else
             {
-                Log(LOG_WARN, "can't delete temporary file %s: %s", Tmp,
+                Log(LOG_ERR, "can't delete temporary file %s: %s", Tmp,
                     strerror(errno));
                 Errors++;
             }
@@ -631,8 +672,8 @@ static int ProcessDir(void)
         }
         else
         {
-            Log(LOG_WARN, "can't rename %s to %s: %s", Tmp, Name,
-                strerror(errno));
+            Log(LOG_ERR, "can't restore %s from temporary file %s: %s, "
+                "retried on the next run", Name, Tmp, strerror(errno));
             Errors++;
             free(Name);
         }

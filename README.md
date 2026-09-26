@@ -27,11 +27,19 @@ truncates the overlong strings, and FastEcho then receives valid packets.
 - It reads `toUserName`, `fromUserName` and `subject` up to their terminating
   null, as FTS-0001 requires. It truncates them to 35, 35 and 71 bytes and
   logs a warning for each truncation.
+- It truncates these strings in every message it can read. That includes a
+  last message cut off by the end of the file: its complete strings are
+  truncated, and its unterminated part is copied as is.
 - It changes nothing else. The packet header, the message headers, the
   message texts and the order of messages stay exactly as they were. Any data
   that does not parse as packed messages is copied as is, byte for byte. That
-  includes an unknown message type, a cut message, a missing or short packet
-  terminator, and garbage after the last message.
+  includes an unknown message type, a missing or short packet terminator, and
+  garbage after the last message. pktsan logs a warning about such data but
+  still processes all messages before it.
+- It skips a packet entirely only when the file is not a packet at all: it
+  is shorter than a packet header, or no packed message follows the header.
+  It also skips a packet it cannot read or write. Each of these cases is
+  logged as an error.
 - It does not validate packets. Checking signatures, passwords and addresses
   is the tosser's job.
 
@@ -80,10 +88,11 @@ named with `-c` must exist. The default config is optional; without it, the
 log goes to the console at the `info` level. Any other argument is an error.
 
 The exit code is 0 on success. It is 1 if an argument or the config is wrong,
-if the log cannot be opened, or if any packet could not be processed. If an
+if the log cannot be opened, or if a file could not be read or written.
+A file that is not a packet is logged as an error but does not change the
+exit code. If an
 argument or the config is wrong or the log cannot be opened, pktsan
-processes no packets at all. Any packet pktsan could not process is left
-unchanged.
+processes no packets at all. A skipped packet is left unchanged.
 
 ## Configuration
 
@@ -96,11 +105,16 @@ LogLevel info
 - `LogFile` is the file pktsan appends its log to. Without it, the log goes
   to the console. You may put the path in double quotes.
 - `LogLevel` takes one of two values:
-  - `info` logs one line for every processed packet, plus all warnings.
-  - `warn` logs warnings only. A warning is any problem, fixed or not: a
-    truncated field, unparsable data after the last message, a file shorter
-    than a packet header, a leftover temporary file, or an error while
-    reading or writing a file.
+  - `info` logs one line for every processed packet, plus all warnings and
+    errors.
+  - `warn` logs warnings and errors only.
+
+  A warning (`[warn]`) is a problem pktsan fixed or worked around; the packet
+  is still processed. Examples are a truncated field, a cut off message,
+  unparsable data after the last message, and a leftover temporary file.
+  An error (`[err]`) means a packet or a file was skipped: it is not a
+  packet at all, or it could not be read or written. Errors are always
+  logged.
 
 Lines starting with `;` or `#` are comments. Keywords are case-insensitive.
 
@@ -110,6 +124,9 @@ Example log:
 2026-09-26 19:42:46 [warn] truncated subject to 71 bytes (was 200) in message #32 in 1234abcd.pkt
 2026-09-26 19:42:46 [info] processed 1234abcd.pkt: 40 messages, 1 fields truncated
 2026-09-26 19:42:46 [info] processed 5678ef01.pkt: 12 messages, nothing truncated
+2026-09-26 19:42:46 [warn] 6ab6fb20.pkt: incomplete packet terminator after message #1 (1 byte at offset 662), kept as is
+2026-09-26 19:42:46 [info] processed 6ab6fb20.pkt: 1 messages, nothing truncated
+2026-09-26 19:42:46 [err] 9abc0123.pkt is not a packet: only 12 bytes, shorter than a packet header, skipped
 ```
 
 ## Building
