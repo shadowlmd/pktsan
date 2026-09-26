@@ -71,7 +71,8 @@ static void Log(int Level, const char * Fmt, ...)
     static const char * Names[] = { "err", "warn", "info" };
     va_list ap;
     time_t t;
-    char Stamp[32];
+    struct tm * tm;
+    char Stamp[32] = "0000-00-00 00:00:00";
     FILE * fh;
 
     if(Level > LogLevel)
@@ -81,7 +82,13 @@ static void Log(int Level, const char * Fmt, ...)
 
     fh = (LogFh != NULL) ? LogFh : stdout;
     t  = time(NULL);
-    strftime(Stamp, sizeof(Stamp), "%Y-%m-%d %H:%M:%S", localtime(&t));
+    tm = localtime(&t);
+
+    if(tm != NULL)
+    {
+        strftime(Stamp, sizeof(Stamp), "%Y-%m-%d %H:%M:%S", tm);
+    }
+
     fprintf(fh, "%s [%s] ", Stamp, Names[Level]);
     va_start(ap, Fmt);
     vfprintf(fh, Fmt, ap);
@@ -410,7 +417,7 @@ static int WritePkt(const char * Path, const unsigned char * Buf, long Size)
 /* Returns 0 on success (changed or not), 1 on error. */
 static int ProcessPacket(const char * Path, const char * Tmp)
 {
-    struct stat st, st2;
+    struct stat st;
     unsigned char * In;
     unsigned char * Out;
     Trunc * Tr = NULL;
@@ -514,16 +521,6 @@ static int ProcessPacket(const char * Path, const char * Tmp)
         goto done;
     }
 
-    /* the packet must not have been changed by somebody else meanwhile */
-    if(stat(Path, &st2) != 0 || st2.st_size != st.st_size ||
-       st2.st_mtime != st.st_mtime)
-    {
-        Log(LOG_ERR, "%s was changed by another program while processing, "
-            "skipped", LPath);
-        remove(Tmp);
-        goto done;
-    }
-
     errno = 0;
 
     if(remove(Path) != 0)
@@ -545,7 +542,13 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 
     ut.actime  = st.st_atime;
     ut.modtime = st.st_mtime;
-    utime(Path, &ut);
+    errno = 0;
+
+    if(utime(Path, &ut) != 0)
+    {
+        Log(LOG_WARN, "can't restore the file time of %s: %s", LPath,
+            strerror(errno));
+    }
 
     for(i = 0; i < TrCount; i++)
     {
