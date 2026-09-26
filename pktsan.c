@@ -24,7 +24,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
 #include <stdarg.h>
 #include <time.h>
 #include <errno.h>
@@ -33,6 +32,12 @@
 #include <dirent.h>
 #include <utime.h>
 #include <unistd.h>
+
+/* MinGW, Watcom, Borland, DJGPP and EMX have stricmp(), Unix strcasecmp() */
+#if defined(__unix__) || defined(__APPLE__)
+#include <strings.h>
+#define stricmp strcasecmp
+#endif
 
 #define PROGNAME    "pktsan"
 #define VERSION     "1.0"
@@ -103,17 +108,6 @@ static char * StrDup(const char * s)
     return strcpy((char *)Alloc(strlen(s) + 1), s);
 }
 
-static int StrICmp(const char * a, const char * b)
-{
-    while(*a != '\0' && tolower((unsigned char)*a) == tolower((unsigned char)*b))
-    {
-        a++;
-        b++;
-    }
-
-    return tolower((unsigned char)*a) - tolower((unsigned char)*b);
-}
-
 /* "name.xxx" -> "name" + Ext */
 static char * ChangeExt(const char * Name, const char * Ext)
 {
@@ -151,7 +145,7 @@ static int HasExt(const char * Name, const char * Ext)
 {
     size_t l = strlen(Name);
 
-    return l >= 4 && StrICmp(Name + l - 4, Ext) == 0;
+    return l >= 4 && stricmp(Name + l - 4, Ext) == 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -179,15 +173,10 @@ static char * Trim(char * s)
 {
     char * e;
 
-    while(*s == ' ' || *s == '\t')
-    {
-        s++;
-    }
+    s += strspn(s, " \t");
+    e  = s + strlen(s);
 
-    e = s + strlen(s);
-
-    while(e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' ||
-                    e[-1] == '\n'))
+    while(e > s && strchr(" \t\r\n", e[-1]) != NULL)
     {
         *--e = '\0';
     }
@@ -231,9 +220,7 @@ static int ReadConfig(const char * Path, int Required, char ** LogFile)
             continue;
         }
 
-        for(Val = Key; *Val != '\0' && *Val != ' ' && *Val != '\t'; Val++)
-        {
-        }
+        Val = Key + strcspn(Key, " \t");
 
         if(*Val != '\0')
         {
@@ -249,16 +236,16 @@ static int ReadConfig(const char * Path, int Required, char ** LogFile)
             Val++;
         }
 
-        if(StrICmp(Key, "LogFile") == 0 && *Val != '\0')
+        if(stricmp(Key, "LogFile") == 0 && *Val != '\0')
         {
             free(*LogFile);
             *LogFile = StrDup(Val);
         }
-        else if(StrICmp(Key, "LogLevel") == 0 && StrICmp(Val, "info") == 0)
+        else if(stricmp(Key, "LogLevel") == 0 && stricmp(Val, "info") == 0)
         {
             LogLevel = LOG_INFO;
         }
-        else if(StrICmp(Key, "LogLevel") == 0 && StrICmp(Val, "warn") == 0)
+        else if(stricmp(Key, "LogLevel") == 0 && stricmp(Val, "warn") == 0)
         {
             LogLevel = LOG_WARN;
         }
@@ -615,7 +602,7 @@ static long FindName(char ** List, long Count, const char * Name)
 
     for(i = 0; i < Count; i++)
     {
-        if(StrICmp(List[i], Name) == 0)
+        if(stricmp(List[i], Name) == 0)
         {
             return i;
         }
