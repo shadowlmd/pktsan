@@ -62,6 +62,7 @@ typedef struct
     long msg;      /* message number in the packet, from 1 */
     int  field;    /* index in FieldName */
     long len;      /* original length without the null */
+    long at;       /* offset of the first byte cut off */
 } Trunc;
 
 /* ------------------------------------------------------------------ */
@@ -272,162 +273,200 @@ static int ReadConfig(const char * Path, int Required, char ** LogFile)
 /* Packet processing                                                  */
 
 /*
- * Copies packet In to Out (at most InLen bytes) truncating too long strings.
- * Truncations are stored to *Tr (allocated), their number to *TrCount.
- * A message cut off by the end of the file is counted too: its complete
- * strings are truncated and the rest is copied as is. *Tail is the offset
- * of the data after the last complete message (the start of the cut off
- * message, if any). Returns the number of messages.
+ * Reads the packet and finds the strings to truncate. Truncations are
+ * stored to *Tr (allocated) in file order, their number to *TrCount.
+ * A message cut off by the end of the file is counted too, and its complete
+ * strings are truncated. *Size is the file size, *Tail the offset of the
+ * data after the last complete message (the start of the cut off message,
+ * if any), *B0 and *B1 the first two bytes there (EOF if none).
+ * Returns the number of messages.
  */
-static long TrimPacket(const unsigned char * In, long InLen,
-                       unsigned char * Out, long * OutLen,
-                       Trunc ** Tr, long * TrCount, long * Tail)
+static long ScanPacket(FILE * fh, long * Size, long * Tail, int * B0, int * B1,
+                       Trunc ** Tr, long * TrCount)
 {
-    long p = 0, o = 0, Msgs = 0, TrAlloc = 0;
+    long pos = 0, Msgs = 0, TrAlloc = 0;
+    int c;
 
     *Tr      = NULL;
     *TrCount = 0;
+    *Tail    = 0;
+    *B0      = EOF;
+    *B1      = EOF;
 
-    if(InLen >= PKT_HDR_SIZE)
+    while(pos < PKT_HDR_SIZE && getc(fh) != EOF)
     {
-        memcpy(Out, In, PKT_HDR_SIZE);
-        p = o = PKT_HDR_SIZE;
+        pos++;
+    }
 
-        while(InLen - p >= 2 && In[p] == 2 && In[p + 1] == 0)
+    /* packed messages, if the header is complete; left by break */
+    while(pos >= PKT_HDR_SIZE)
+    {
+        long Start = pos;
+        int i;
+
+        *Tail = Start;
+        *B0   = getc(fh);
+        *B1   = (*B0 == EOF) ? EOF : getc(fh);
+        pos  += (*B0 != EOF) + (*B1 != EOF);
+
+        if(*B0 != 2 || *B1 != 0)
         {
-            long Start[4], Len[4];
-            long q = p + MSG_HDR_SIZE;
-            int i, n;
+            break;
+        }
 
-            Msgs++;
+        Msgs++;
 
-            if(InLen - p < MSG_HDR_SIZE)
+        while(pos - Start < MSG_HDR_SIZE && getc(fh) != EOF)
+        {
+            pos++;
+        }
+
+        if(pos - Start < MSG_HDR_SIZE)
+        {
+            break; /* cut off in the message header */
+        }
+
+        for(i = 0; i < 4; i++)
+        {
+            long f = pos;
+            long l;
+
+            while((c = getc(fh)) != EOF && c != 0)
             {
-                break; /* cut off in the message header */
+                pos++;
             }
 
-            for(n = 0; n < 4; n++)
+            if(c == EOF)
             {
-                const unsigned char * z =
-                    (const unsigned char *)memchr(In + q, 0, InLen - q);
-
-                if(z == NULL)
-                {
-                    break;
-                }
-
-                Start[n] = q;
-                Len[n]   = (long)(z - In) - q;
-                q        = (long)(z - In) + 1;
+                break; /* cut off: the unterminated string is kept as is */
             }
 
-            memcpy(Out + o, In + p, MSG_HDR_SIZE);
-            o += MSG_HDR_SIZE;
+            pos++;
+            l = pos - 1 - f;
 
-            for(i = 0; i < n; i++)
+            if(i < 3 && l > FieldSize[i] - 1)
             {
-                long l = Len[i];
-
-                if(i < 3 && l > FieldSize[i] - 1)
+                if(*TrCount == TrAlloc)
                 {
-                    if(*TrCount == TrAlloc)
+                    Trunc * t;
+
+                    TrAlloc = TrAlloc ? TrAlloc * 2 : 16;
+                    t = (Trunc *)realloc(*Tr, TrAlloc * sizeof(Trunc));
+
+                    if(t == NULL)
                     {
-                        Trunc * t;
-
-                        TrAlloc = TrAlloc ? TrAlloc * 2 : 16;
-                        t = (Trunc *)realloc(*Tr, TrAlloc * sizeof(Trunc));
-
-                        if(t == NULL)
-                        {
-                            fprintf(stderr, PROGNAME ": out of memory\n");
-                            exit(1);
-                        }
-
-                        *Tr = t;
+                        fprintf(stderr, PROGNAME ": out of memory\n");
+                        exit(1);
                     }
 
-                    (*Tr)[*TrCount].msg   = Msgs;
-                    (*Tr)[*TrCount].field = i;
-                    (*Tr)[*TrCount].len   = l;
-                    (*TrCount)++;
-                    l = FieldSize[i] - 1;
+                    *Tr = t;
                 }
 
-                memcpy(Out + o, In + Start[i], l);
-                o += l;
-                Out[o++] = 0;
+                (*Tr)[*TrCount].msg   = Msgs;
+                (*Tr)[*TrCount].field = i;
+                (*Tr)[*TrCount].len   = l;
+                (*Tr)[*TrCount].at    = f + FieldSize[i] - 1;
+                (*TrCount)++;
             }
+        }
 
-            if(n < 4)
-            {
-                /* cut off: the unterminated rest is copied as is */
-                memcpy(Out + o, In + q, InLen - q);
-                *OutLen = o + (InLen - q);
-                *Tail   = p;
-                return Msgs;
-            }
-
-            p = q;
+        if(i < 4)
+        {
+            break;
         }
     }
 
-    /* the packet terminator or whatever follows the last message */
-    memcpy(Out + o, In + p, InLen - p);
-    *OutLen = o + (InLen - p);
-    *Tail   = p;
+    while(getc(fh) != EOF)
+    {
+        pos++;
+    }
+
+    *Size = pos;
     return Msgs;
 }
 
-static int ReadPkt(const char * Path, long Size, unsigned char * Buf)
+/* Copies N bytes (all the rest if N < 0) from In to Out (skips if NULL) */
+static int CopyBytes(FILE * In, FILE * Out, long N)
 {
-    FILE * fh = fopen(Path, "rb");
-    size_t n;
-    int c;
+    static char Buf[4096];
 
-    if(fh == NULL)
+    while(N != 0)
     {
-        return 0;
+        size_t k = (N < 0 || N > (long)sizeof(Buf)) ? sizeof(Buf) : (size_t)N;
+        size_t r = fread(Buf, 1, k, In);
+
+        if(Out != NULL && fwrite(Buf, 1, r, Out) != r)
+        {
+            return 0;
+        }
+
+        if(r < k)
+        {
+            return N < 0 && !ferror(In);
+        }
+
+        if(N > 0)
+        {
+            N -= (long)r;
+        }
     }
 
-    n = fread(Buf, 1, (size_t)Size, fh);
-    c = fgetc(fh);
-    fclose(fh);
-    return n == (size_t)Size && c == EOF;
+    return 1;
 }
 
-static int WritePkt(const char * Path, const unsigned char * Buf, long Size)
+/* Writes packet Path without the truncated bytes to Tmp */
+static int WritePkt(const char * Path, const char * Tmp, const Trunc * Tr,
+                    long TrCount, long OutLen)
 {
-    FILE * fh;
-    int Ok;
+    FILE * In;
+    FILE * Out;
+    long pos = 0, i;
+    int Ok = 1;
     struct stat st;
 
-    fh = fopen(Path, "wb");
+    In = fopen(Path, "rb");
 
-    if(fh == NULL)
+    if(In == NULL)
     {
         return 0;
     }
 
-    Ok = fwrite(Buf, 1, (size_t)Size, fh) == (size_t)Size;
-    Ok = (fflush(fh) == 0) && Ok;
-    Ok = (fclose(fh) == 0) && Ok;
-    return Ok && stat(Path, &st) == 0 && (long)st.st_size == Size;
+    Out = fopen(Tmp, "wb");
+
+    if(Out == NULL)
+    {
+        fclose(In);
+        return 0;
+    }
+
+    for(i = 0; Ok && i < TrCount; i++)
+    {
+        long Cut = Tr[i].len - (FieldSize[Tr[i].field] - 1);
+
+        Ok = CopyBytes(In, Out, Tr[i].at - pos) && CopyBytes(In, NULL, Cut);
+        pos = Tr[i].at + Cut;
+    }
+
+    Ok = Ok && CopyBytes(In, Out, -1);
+    fclose(In);
+    Ok = (fflush(Out) == 0) && Ok;
+    Ok = (fclose(Out) == 0) && Ok;
+    return Ok && stat(Tmp, &st) == 0 && (long)st.st_size == OutLen;
 }
 
 /* Returns 0 on success (changed or not), 1 on error. */
 static int ProcessPacket(const char * Path, const char * Tmp)
 {
     struct stat st;
-    unsigned char * In;
-    unsigned char * Out;
+    FILE * fh;
     Trunc * Tr = NULL;
-    long OutLen, TrCount, Msgs, Tail, Rest, i;
+    long Size, TrCount, Msgs, Tail, Rest, OutLen, i;
+    int B0, B1, Bad;
     struct utimbuf ut;
     int Rc = 1;
     char * LPath = FullPath(Path);
     char * LTmp  = FullPath(Tmp);
 
-    In = Out = NULL;
     errno = 0;
 
     if(stat(Path, &st) != 0)
@@ -436,36 +475,36 @@ static int ProcessPacket(const char * Path, const char * Tmp)
         goto done;
     }
 
-    In  = (unsigned char *)malloc(st.st_size ? (size_t)st.st_size : 1);
-    Out = (unsigned char *)malloc(st.st_size ? (size_t)st.st_size : 1);
+    errno = 0;
+    fh = fopen(Path, "rb");
 
-    if(In == NULL || Out == NULL)
+    if(fh == NULL)
     {
-        Log(LOG_ERR, "not enough memory for %s (%ld bytes), skipped",
-            LPath, (long)st.st_size);
+        Log(LOG_ERR, "can't read %s: %s, skipped", LPath, strerror(errno));
         goto done;
     }
 
-    errno = 0;
+    Msgs = ScanPacket(fh, &Size, &Tail, &B0, &B1, &Tr, &TrCount);
+    Bad  = ferror(fh);
+    fclose(fh);
 
-    if(!ReadPkt(Path, (long)st.st_size, In))
+    if(Bad)
     {
         Log(LOG_ERR, "can't read %s: %s, skipped", LPath,
-            errno ? strerror(errno) : "size changed while reading");
+            errno ? strerror(errno) : "read error");
         goto done;
     }
 
-    if(st.st_size < PKT_HDR_SIZE)
+    if(Size < PKT_HDR_SIZE)
     {
         Log(LOG_ERR, "%s is not a packet: only %ld bytes, shorter than a packet "
-            "header, skipped", LPath, (long)st.st_size);
+            "header, skipped", LPath, Size);
         goto done;
     }
 
-    Msgs = TrimPacket(In, (long)st.st_size, Out, &OutLen, &Tr, &TrCount, &Tail);
-    Rest = (long)st.st_size - Tail;
+    Rest = Size - Tail;
 
-    if(Rest == 2 && In[Tail] == 0 && In[Tail + 1] == 0)
+    if(Rest == 2 && B0 == 0 && B1 == 0)
     {
         /* a proper packet terminator */
     }
@@ -476,7 +515,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
             Rest, Tail);
         goto done;
     }
-    else if(Rest >= 2 && In[Tail] == 2 && In[Tail + 1] == 0)
+    else if(B0 == 2 && B1 == 0)
     {
         Log(LOG_WARN, "%s: message #%ld (offset %ld) is cut off by the end of "
             "the file, its unterminated part is kept as is", LPath, Msgs, Tail);
@@ -486,12 +525,12 @@ static int ProcessPacket(const char * Path, const char * Tmp)
         Log(LOG_WARN, "%s: no packet terminator, the file ends right after "
             "message #%ld", LPath, Msgs);
     }
-    else if(Rest == 1 && In[Tail] == 0)
+    else if(Rest == 1 && B0 == 0)
     {
         Log(LOG_WARN, "%s: incomplete packet terminator after message #%ld "
             "(1 byte at offset %ld), kept as is", LPath, Msgs, Tail);
     }
-    else if(Rest > 2 && In[Tail] == 0 && In[Tail + 1] == 0)
+    else if(Rest > 2 && B0 == 0 && B1 == 0)
     {
         Log(LOG_WARN, "%s: %ld bytes of unknown data after the packet "
             "terminator (offset %ld), kept as is", LPath, Rest - 2, Tail + 2);
@@ -511,12 +550,19 @@ static int ProcessPacket(const char * Path, const char * Tmp)
         goto done;
     }
 
+    OutLen = Size;
+
+    for(i = 0; i < TrCount; i++)
+    {
+        OutLen -= Tr[i].len - (FieldSize[Tr[i].field] - 1);
+    }
+
     errno = 0;
 
-    if(!WritePkt(Tmp, Out, OutLen))
+    if(!WritePkt(Path, Tmp, Tr, TrCount, OutLen))
     {
         Log(LOG_ERR, "can't write %s: %s, %s skipped", LTmp,
-            errno ? strerror(errno) : "short write", LPath);
+            errno ? strerror(errno) : "read or write error", LPath);
         remove(Tmp);
         goto done;
     }
@@ -563,8 +609,6 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 
 done:
     free(Tr);
-    free(In);
-    free(Out);
     free(LPath);
     free(LTmp);
     return Rc;

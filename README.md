@@ -21,7 +21,8 @@ pktsan runs before the tosser and truncates the strings.
 - Skips a file that is not a packet: shorter than a packet header (58
   bytes), or no packed messages after the header.
 
-A packet that needs no changes is not written to. A packet that needs
+Packets are read as a stream: memory use does not depend on the packet
+size. A packet that needs no changes is not written to. A packet that needs
 changes is written to `name.tr$`, then `name.pkt` is deleted, `name.tr$` is
 renamed to `name.pkt` and the original file time is restored.
 

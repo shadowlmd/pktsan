@@ -295,6 +295,26 @@ def big_text():
 
 
 @test
+def streaming_memory():
+    """A packet bigger than the memory limit is processed."""
+    if "asan" in os.path.basename(EXE):
+        return
+    import resource
+    env = Env()
+    text = b"x" * (100 * 1024 * 1024)
+    data = packet([pmsg(subj=b"S" * 100, text=text), pmsg(to=b"T" * 40)])
+    env.put("big.pkt", data)
+    lim = 64 * 1024 * 1024
+    r = subprocess.run([EXE, "-c", env.cfg], cwd=env.dir, capture_output=True,
+                       preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_AS, (lim, lim)))
+    assert r.returncode == 0, r
+    assert env.get("big.pkt") == reference(data)[0]
+    assert [l[1] for l in env.loglines("info")] == [
+        "processed big.pkt: 2 messages, 2 fields truncated"]
+    env.cleanup()
+
+
+@test
 def terminators():
     long = pmsg(to=b"L" * 50)
     for tail in (b"\0\0", b"\0", b"", b"\0\0\0\0", b"\0\0garbage",
