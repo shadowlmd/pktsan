@@ -32,6 +32,7 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <utime.h>
+#include <unistd.h>
 
 #define PROGNAME    "pktsan"
 #define VERSION     "1.0"
@@ -604,6 +605,19 @@ static int ProcessDir(void)
     int Errors = 0;
     DIR * d;
     struct dirent * de;
+    char Dir[1024];
+
+    errno = 0;
+
+    if(getcwd(Dir, sizeof(Dir)) != NULL)
+    {
+        Log(LOG_INFO, PROGNAME " " VERSION " started in %s", Dir);
+    }
+    else
+    {
+        Log(LOG_INFO, PROGNAME " " VERSION " started in the current directory "
+            "(can't get its name: %s)", strerror(errno));
+    }
 
     errno = 0;
     d = opendir(".");

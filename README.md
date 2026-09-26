@@ -105,8 +105,8 @@ LogLevel info
 - `LogFile` is the file pktsan appends its log to. Without it, the log goes
   to the console. You may put the path in double quotes.
 - `LogLevel` takes one of two values:
-  - `info` logs one line for every processed packet, plus all warnings and
-    errors.
+  - `info` logs the directory pktsan started in, one line for every
+    processed packet, and all warnings and errors.
   - `warn` logs warnings and errors only.
 
   A warning (`[warn]`) is a problem pktsan fixed or worked around; the packet
@@ -121,6 +121,7 @@ Lines starting with `;` or `#` are comments. Keywords are case-insensitive.
 Example log:
 
 ```
+2026-09-26 19:42:46 [info] pktsan 1.0 started in c:\ftn\inbound\temp
 2026-09-26 19:42:46 [warn] truncated subject to 71 bytes (was 200) in message #32 in 1234abcd.pkt
 2026-09-26 19:42:46 [info] processed 1234abcd.pkt: 40 messages, 1 fields truncated
 2026-09-26 19:42:46 [info] processed 5678ef01.pkt: 12 messages, nothing truncated

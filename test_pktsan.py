@@ -136,12 +136,16 @@ class Env:
         with open(self.log) as f:
             return f.read()
 
-    def loglines(self, level=None):
+    def loglines(self, level=None, started=False):
+        """Log lines as (level, text); the start line only if started."""
         res = []
         for line in self.logtext().splitlines():
             m = re.match(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d \[(\w+)\] (.*)$", line)
             assert m, "bad log line: %r" % line
-            assert (m.group(1) == "info") == m.group(2).startswith("processed "), line
+            start = m.group(2).startswith("pktsan 1.0 started in ")
+            assert (m.group(1) == "info") == (start or m.group(2).startswith("processed ")), line
+            if start and not started:
+                continue
             if level is None or m.group(1) == level:
                 res.append((m.group(1), m.group(2)))
         return res
@@ -394,6 +398,29 @@ def log_level_info_lists_all_packets():
     infos = [l[1] for l in env.loglines("info")]
     assert len([i for i in infos if i.startswith("processed ")]) == 5
     assert len(env.loglines("warn")) == 3
+    env.cleanup()
+
+
+@test
+def start_line():
+    env = Env()
+    env.put("1.pkt", packet([pmsg()]))
+    assert env.run().returncode == 0
+    assert env.loglines(started=True) == [
+        ("info", "pktsan 1.0 started in %s" % os.path.realpath(env.dir)),
+        ("info", "processed 1.pkt: 1 messages, nothing truncated")]
+    # logged even when there is nothing to process
+    os.remove(os.path.join(env.dir, "1.pkt"))
+    os.remove(env.log)
+    assert env.run().returncode == 0
+    assert env.loglines(started=True) == [
+        ("info", "pktsan 1.0 started in %s" % os.path.realpath(env.dir))]
+    env.cleanup()
+    # not logged at the warn level
+    env = Env(cfg="LogLevel warn\n")
+    env.put("1.pkt", packet([pmsg()]))
+    assert env.run().returncode == 0
+    assert env.logtext() == ""
     env.cleanup()
 
 
