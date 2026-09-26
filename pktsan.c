@@ -127,7 +127,7 @@ static char * ChangeExt(const char * Name, const char * Ext)
 
 /*
  * Name in the current directory with its full path, for the log. The
- * separator follows getcwd(): DJGPP returns c:/dir, MinGW returns C:\\dir.
+ * separator follows getcwd(): DJGPP returns c:/dir, MinGW returns C:\dir.
  */
 static char * FullPath(const char * Name)
 {
