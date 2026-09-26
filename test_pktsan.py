@@ -137,17 +137,25 @@ class Env:
             return f.read()
 
     def loglines(self, level=None, started=False):
-        """Log lines as (level, text); the start line only if started."""
+        """Log lines as (level, text); the start line only if started.
+
+        Every file name must be logged with the full path of the directory,
+        which is then removed from the text."""
+        prefix = os.path.realpath(self.dir) + "/"
         res = []
         for line in self.logtext().splitlines():
             m = re.match(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d \[(\w+)\] (.*)$", line)
             assert m, "bad log line: %r" % line
-            start = m.group(2).startswith("pktsan 1.0 started in ")
-            assert (m.group(1) == "info") == (start or m.group(2).startswith("processed ")), line
+            text = m.group(2)
+            for f in re.findall(r"[^\s(]+\.(?:pkt|tr\$)", text, re.I):
+                assert f.startswith(prefix), "no full path: %r" % line
+            text = text.replace(prefix, "")
+            start = text.startswith("pktsan 1.0 started in ")
+            assert (m.group(1) == "info") == (start or text.startswith("processed ")), line
             if start and not started:
                 continue
             if level is None or m.group(1) == level:
-                res.append((m.group(1), m.group(2)))
+                res.append((m.group(1), text))
         return res
 
     def files(self):
@@ -481,21 +489,22 @@ def default_config_next_to_program():
     env.put("1.pkt", packet([pmsg(to=b"x" * 40)]))
     r = subprocess.run([exe], cwd=env.dir, capture_output=True)
     assert r.returncode == 0 and r.stdout == b"", r
-    assert "processed 1.pkt" in env.logtext()
+    assert "processed %s/1.pkt" % os.path.realpath(env.dir) in env.logtext()
     # started by a relative path: the config is still next to the program
     os.remove(env.log)
     r = subprocess.run([os.path.join("..", "bin", "pktsan")], cwd=env.dir, capture_output=True)
     assert r.returncode == 0 and r.stdout == b"", r
-    assert "processed 1.pkt" in env.logtext()
+    assert "processed %s/1.pkt" % os.path.realpath(env.dir) in env.logtext()
     # started without a path (found in PATH): the config is looked for
     # in the current directory
     r = subprocess.run(["pktsan"], cwd=env.dir, capture_output=True,
                        env=dict(os.environ, PATH=bindir))
-    assert r.returncode == 0 and b"[info] processed 1.pkt" in r.stdout, r
+    assert r.returncode == 0 and b"/1.pkt: 1 messages" in r.stdout, r
     # no config at all: defaults, log to stdout
     os.remove(os.path.join(bindir, "pktsan.cfg"))
     r = subprocess.run([exe], cwd=env.dir, capture_output=True)
-    assert r.returncode == 0 and b"[info] processed 1.pkt: 1 messages, nothing truncated" in r.stdout, r
+    assert r.returncode == 0 and ("[info] processed %s/1.pkt: 1 messages, nothing truncated"
+                                  % os.path.realpath(env.dir)).encode() in r.stdout, r
     env.cleanup()
 
 
@@ -527,7 +536,7 @@ def temp_files_from_interrupted_run():
         ("warn", "deleted incomplete temporary file 1.tr$"),
         ("warn", "deleted incomplete temporary file 2.TR$"),
         ("warn", "restored 3.pkt from temporary file 3.tr$")]
-    assert "processed 3.pkt: 1 messages, 1 fields truncated" in env.logtext()
+    assert ("info", "processed 3.pkt: 1 messages, 1 fields truncated") in env.loglines()
     env.cleanup()
 
 
@@ -567,6 +576,7 @@ def broken_symlink_is_logged():
     assert r.returncode == 1
     assert env.loglines() == [
         ("err", "can't stat 1.pkt: No such file or directory, skipped")], env.logtext()
+    assert "can't stat %s/1.pkt:" % os.path.realpath(env.dir) in env.logtext()
     env.cleanup()
 
 
