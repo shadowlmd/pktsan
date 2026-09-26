@@ -431,6 +431,14 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 
     if(!(st.st_size - Tail == 2 && In[Tail] == 0 && In[Tail + 1] == 0))
     {
+        if(Msgs == 0)
+        {
+            Log(LOG_WARN, "%s: no packed messages after the packet header, "
+                "left unchanged", Path);
+            Rc = 0;
+            goto done;
+        }
+
         Log(LOG_WARN, "%s: %ld bytes after message #%ld (offset %ld) are not "
             "a packet terminator, left unchanged", Path,
             (long)st.st_size - Tail, Msgs, Tail);
@@ -574,7 +582,8 @@ static int ProcessDir(void)
         if(Pkt || HasExt(de->d_name, ".tr$"))
         {
             struct stat st;
-            int Reg = stat(de->d_name, &st) == 0 && S_ISREG(st.st_mode);
+            /* a packet that can't be stat'ed is logged when processed */
+            int Reg = stat(de->d_name, &st) != 0 || S_ISREG(st.st_mode);
 
             if(Reg && Pkt)
             {

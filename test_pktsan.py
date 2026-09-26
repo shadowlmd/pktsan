@@ -164,6 +164,9 @@ def check_packet(env, name, data, r=None):
     tail_ok = len(data) >= 58 and len(data) - reference_tail(data) == 2 and data.endswith(b"\0\0")
     assert bool(other) == (not tail_ok), other
     assert not [f for f in env.files() if f.lower().endswith("$")], env.files()
+    # every packet is mentioned in the log at the info level
+    if "LogLevel info" in open(env.cfg).read():
+        assert [l for l in env.loglines() if name in l[1]], env.logtext()
     return n, tr
 
 
@@ -300,7 +303,21 @@ def short_files():
         assert tr == []
         if size < 58:
             assert [l for l in env.loglines("warn") if "shorter than a packet header" in l[1]]
+        else:
+            assert env.loglines() == [("warn", "s.pkt: no packed messages after "
+                                       "the packet header, left unchanged")], size
         env.cleanup()
+    # a valid empty packet is fine
+    env = Env()
+    check_packet(env, "s.pkt", packet([]))
+    assert env.loglines() == [("info", "processed s.pkt: 0 messages, nothing truncated")]
+    env.cleanup()
+    # garbage right after the header
+    env = Env()
+    check_packet(env, "s.pkt", packet([], tail=b"\x01\x00" + b"x" * 100))
+    assert env.loglines() == [("warn", "s.pkt: no packed messages after "
+                               "the packet header, left unchanged")]
+    env.cleanup()
 
 
 @test
@@ -484,6 +501,17 @@ def read_only_directory():
 
 
 @test
+def broken_symlink_is_logged():
+    env = Env()
+    os.symlink("nowhere", os.path.join(env.dir, "1.pkt"))
+    r = env.run()
+    assert r.returncode == 1
+    assert [l[1] for l in env.loglines()] == [
+        "can't stat 1.pkt: No such file or directory"], env.logtext()
+    env.cleanup()
+
+
+@test
 def unreadable_packet_does_not_stop_others():
     if os.geteuid() == 0:
         return
@@ -521,7 +549,7 @@ def idempotent():
 @test
 def fuzz():
     rnd = random.Random(12345)
-    env = Env(cfg="LogLevel warn\n")
+    env = Env()
     for it in range(1500):
         msgs = []
         for _ in range(rnd.randrange(0, 8)):
