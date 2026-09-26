@@ -438,7 +438,6 @@ static int ProcessPacket(const char * Path, const char * Tmp)
     {
         Log(LOG_ERR, "%s is not a packet: only %ld bytes, shorter than a packet "
             "header, skipped", Path, (long)st.st_size);
-        Rc = 0;
         goto done;
     }
 
@@ -454,7 +453,6 @@ static int ProcessPacket(const char * Path, const char * Tmp)
         Log(LOG_ERR, "%s is not a packet: no packed messages after the packet "
             "header (%ld bytes of unknown data at offset %ld), skipped", Path,
             Rest, Tail);
-        Rc = 0;
         goto done;
     }
     else if(Rest >= 2 && In[Tail] == 2 && In[Tail + 1] == 0)

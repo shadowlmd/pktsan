@@ -168,7 +168,7 @@ def check_packet(env, name, data, r=None):
         r = env.run()
     prob = expected_problem(data)
     skipped = prob is not None and prob[0] == "err"
-    assert r.returncode == 0, r
+    assert r.returncode == (1 if skipped else 0), r
     exp, n, tr, _ = reference(data)
     got = env.get(name)
     if skipped:

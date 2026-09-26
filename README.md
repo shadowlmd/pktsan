@@ -88,9 +88,9 @@ named with `-c` must exist. The default config is optional; without it, the
 log goes to the console at the `info` level. Any other argument is an error.
 
 The exit code is 0 on success. It is 1 if an argument or the config is wrong,
-if the log cannot be opened, or if a file could not be read or written.
-A file that is not a packet is logged as an error but does not change the
-exit code. If an
+if the log cannot be opened, or if any error was logged: a packet was
+skipped because it is not a packet at all, or a file could not be read or
+written. If an
 argument or the config is wrong or the log cannot be opened, pktsan
 processes no packets at all. A skipped packet is left unchanged.
 
