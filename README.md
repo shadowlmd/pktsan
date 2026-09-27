@@ -21,8 +21,7 @@ pktsan runs before the tosser and truncates the strings.
 - Skips a file that is not a packet: shorter than a packet header (58
   bytes), or followed by neither packed messages nor a packet terminator.
 
-Packets are read as a stream: memory use does not depend on the packet
-size. A packet that needs no changes is not written to. A packet that needs
+A packet that needs no changes is not written to. A packet that needs
 changes is written to `name.tr$`, then `name.pkt` is deleted, `name.tr$` is
 renamed to `name.pkt` and the original file time is restored.
 
@@ -106,10 +105,10 @@ File names are logged with the full path.
 ```
 2026-09-26 19:42:46 [info] pktsan 1.0 started in c:\ftn\inbound\temp
 2026-09-26 19:42:46 [warn] truncated subject to 71 bytes (was 200) in message #32 in c:\ftn\inbound\temp\1234abcd.pkt
-2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\1234abcd.pkt: 40 messages, 1 fields truncated
-2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\5678ef01.pkt: 12 messages, no changes needed
+2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\1234abcd.pkt: messages 40, modified 1
+2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\5678ef01.pkt: messages 12, modified 0
 2026-09-26 19:42:46 [warn] c:\ftn\inbound\temp\6ab6fb20.pkt: incomplete packet terminator after message #1 (1 byte at offset 662), kept as is
-2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\6ab6fb20.pkt: 1 messages, no changes needed
+2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\6ab6fb20.pkt: messages 1, modified 0
 2026-09-26 19:42:46 [err] c:\ftn\inbound\temp\9abc0123.pkt is not a packet: only 12 bytes, shorter than a packet header, skipped
 ```
 

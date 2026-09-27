@@ -469,7 +469,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
     struct stat st;
     FILE * fh;
     Trunc * Tr = NULL;
-    long Size, TrCount, Msgs, Tail, Rest, OutLen, i;
+    long Size, TrCount, Msgs, Tail, Rest, OutLen, Mod, i;
     int B0, B1, Bad;
     struct utimbuf ut;
     int Rc = 1;
@@ -555,8 +555,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 
     if(TrCount == 0)
     {
-        Log(LOG_INFO, "processed %s: %ld messages, no changes needed", LPath,
-            Msgs);
+        Log(LOG_INFO, "processed %s: messages %ld, modified 0", LPath, Msgs);
         Rc = 0;
         goto done;
     }
@@ -614,8 +613,14 @@ static int ProcessPacket(const char * Path, const char * Tmp)
             Tr[i].len, Tr[i].msg, LPath);
     }
 
-    Log(LOG_INFO, "processed %s: %ld messages, %ld fields truncated", LPath,
-        Msgs, TrCount);
+    /* truncations are in message order */
+    for(i = 0, Mod = 0; i < TrCount; i++)
+    {
+        Mod += (i == 0 || Tr[i].msg != Tr[i - 1].msg);
+    }
+
+    Log(LOG_INFO, "processed %s: messages %ld, modified %ld", LPath, Msgs,
+        Mod);
     Rc = 0;
 
 done:

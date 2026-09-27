@@ -202,8 +202,8 @@ def check_packet(env, name, data, r=None):
     if skipped:
         assert info == []
     elif "LogLevel info" in open(env.cfg).read():
-        assert info == ["processed %s: %d messages, %s" % (
-            name, n, "%d fields truncated" % len(tr) if tr else "no changes needed")], info
+        assert info == ["processed %s: messages %d, modified %d" % (
+            name, n, len(set(m for m, _, _ in tr)))], info
     assert not [f for f in env.files() if f.lower().endswith("$")], env.files()
     return n, tr
 
@@ -224,7 +224,7 @@ def no_changes():
     data = packet([pmsg(), pmsg(to=b"A" * 35, frm=b"B" * 35, subj=b"C" * 71)])
     n, tr = check_packet(env, "0001.pkt", data)
     assert n == 2 and tr == []
-    assert env.loglines() == [("info", "processed 0001.pkt: 2 messages, no changes needed")]
+    assert env.loglines() == [("info", "processed 0001.pkt: messages 2, modified 0")]
     env.cleanup()
 
 
@@ -251,7 +251,7 @@ def all_fields_long_log_format():
     assert tr == [(2, 0, 40), (2, 1, 36), (2, 2, 200)]
     assert env.loglines("warn")[2][1] == \
         "truncated subject to 71 bytes (was 200) in message #2 in ab.pkt"
-    assert env.loglines("info")[-1][1] == "processed ab.pkt: 2 messages, 3 fields truncated"
+    assert env.loglines("info")[-1][1] == "processed ab.pkt: messages 2, modified 1"
     env.cleanup()
 
 
@@ -310,7 +310,7 @@ def streaming_memory():
     assert r.returncode == 0, r
     assert env.get("big.pkt") == reference(data)[0]
     assert [l[1] for l in env.loglines("info")] == [
-        "processed big.pkt: 2 messages, 2 fields truncated"]
+        "processed big.pkt: messages 2, modified 2"]
     env.cleanup()
 
 
@@ -373,7 +373,7 @@ def short_files():
     # a valid empty packet is fine
     env = Env()
     check_packet(env, "s.pkt", packet([]))
-    assert env.loglines() == [("info", "processed s.pkt: 0 messages, no changes needed")]
+    assert env.loglines() == [("info", "processed s.pkt: messages 0, modified 0")]
     env.cleanup()
     # garbage right after the header
     env = Env()
@@ -436,7 +436,7 @@ def start_line():
     assert env.run().returncode == 0
     assert env.loglines(started=True) == [
         ("info", "pktsan 1.0 started in %s" % os.path.realpath(env.dir)),
-        ("info", "processed 1.pkt: 1 messages, no changes needed")]
+        ("info", "processed 1.pkt: messages 1, modified 0")]
     # logged even when there is nothing to process
     os.remove(os.path.join(env.dir, "1.pkt"))
     os.remove(env.log)
@@ -535,11 +535,11 @@ def default_config_next_to_program():
     # in the current directory
     r = subprocess.run(["pktsan"], cwd=env.dir, capture_output=True,
                        env=dict(os.environ, PATH=bindir))
-    assert r.returncode == 0 and b"/1.pkt: 1 messages" in r.stdout, r
+    assert r.returncode == 0 and b"/1.pkt: messages 1" in r.stdout, r
     # no config at all: defaults, log to stdout
     os.remove(os.path.join(bindir, "pktsan.cfg"))
     r = subprocess.run([exe], cwd=env.dir, capture_output=True)
-    assert r.returncode == 0 and ("[info] processed %s/1.pkt: 1 messages, no changes needed"
+    assert r.returncode == 0 and ("[info] processed %s/1.pkt: messages 1, modified 0"
                                   % os.path.realpath(env.dir)).encode() in r.stdout, r
     env.cleanup()
 
@@ -572,7 +572,7 @@ def temp_files_from_interrupted_run():
         ("warn", "deleted incomplete temporary file 1.tr$"),
         ("warn", "deleted incomplete temporary file 2.TR$"),
         ("warn", "restored 3.pkt from temporary file 3.tr$")]
-    assert ("info", "processed 3.pkt: 1 messages, 1 fields truncated") in env.loglines()
+    assert ("info", "processed 3.pkt: messages 1, modified 1") in env.loglines()
     env.cleanup()
 
 
@@ -600,7 +600,7 @@ def read_only_directory():
     assert env.get("1.pkt") == data and env.files() == ["1.pkt", "2.pkt"]
     assert [l for l in env.loglines() if l[0] != "info"] == [
         ("err", "can't write 1.tr$: Permission denied, 1.pkt skipped")]
-    assert [l[1] for l in env.loglines("info")] == ["processed 2.pkt: 1 messages, no changes needed"]
+    assert [l[1] for l in env.loglines("info")] == ["processed 2.pkt: messages 1, modified 0"]
     env.cleanup()
 
 
@@ -646,8 +646,8 @@ def idempotent():
     assert len([w for w in warns if w.startswith("truncated ")]) == 9
     assert len([w for w in warns if "incomplete packet terminator" in w]) == 2
     assert [l[1] for l in env.loglines("info")] == [
-        "processed 1.pkt: 3 messages, 9 fields truncated",
-        "processed 1.pkt: 3 messages, no changes needed"]
+        "processed 1.pkt: messages 3, modified 3",
+        "processed 1.pkt: messages 3, modified 0"]
     env.cleanup()
 
 
