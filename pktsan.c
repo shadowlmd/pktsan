@@ -646,7 +646,7 @@ static void AddName(char *** List, long * Count, long * Size, char * Name)
     (*List)[(*Count)++] = Name;
 }
 
-static long FindName(char ** List, long Count, const char * Name)
+static int HasName(char ** List, long Count, const char * Name)
 {
     long i;
 
@@ -654,11 +654,11 @@ static long FindName(char ** List, long Count, const char * Name)
     {
         if(stricmp(List[i], Name) == 0)
         {
-            return i;
+            return 1;
         }
     }
 
-    return -1;
+    return 0;
 }
 
 /* Processes directory Dir. Returns the number of errors. */
@@ -714,7 +714,7 @@ static int ProcessDir(const char * Dir)
         char * PTmp  = JoinPath(Dir, Tmps[i]);
         char * PName = JoinPath(Dir, Name);
 
-        if(FindName(Pkts, NPkts, Name) >= 0)
+        if(HasName(Pkts, NPkts, Name))
         {
             if(remove(PTmp) == 0)
             {
@@ -806,7 +806,7 @@ int main(int argc, char ** argv)
         }
     }
 
-    if(optind == argc)
+    if(optind >= argc)
     {
         free(Cfg);
         Usage(stderr);

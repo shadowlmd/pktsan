@@ -139,8 +139,8 @@ class Env:
         with open(self.log) as f:
             return f.read()
 
-    def loglines(self, level=None, started=False):
-        """Log lines as (level, text); "processing directory" lines only if started.
+    def loglines(self, level=None, dirs=False):
+        """Log lines as (level, text); "processing directory" lines only if dirs.
 
         Every file name must be logged with the full path of the directory,
         which is then removed from the text."""
@@ -153,9 +153,9 @@ class Env:
             for f in re.findall(r"[^\s(]+\.(?:pkt|tr\$)", text, re.I):
                 assert f.startswith(self.root + "/"), "no full path: %r" % line
             text = text.replace(prefix, "")
-            start = text.startswith("processing directory ")
-            assert (m.group(1) == "info") == (start or text.startswith("processed ")), line
-            if start and not started:
+            isdir = text.startswith("processing directory ")
+            assert (m.group(1) == "info") == (isdir or text.startswith("processed ")), line
+            if isdir and not dirs:
                 continue
             if level is None or m.group(1) == level:
                 res.append((m.group(1), text))
@@ -434,18 +434,18 @@ def log_level_info_lists_all_packets():
 
 
 @test
-def start_line():
+def directory_line():
     env = Env()
     env.put("1.pkt", packet([pmsg()]))
     assert env.run().returncode == 0
-    assert env.loglines(started=True) == [
+    assert env.loglines(dirs=True) == [
         ("info", "processing directory %s" % env.dir),
         ("info", "processed 1.pkt: messages 1, modified 0")]
     # logged even when there is nothing to process
     os.remove(os.path.join(env.dir, "1.pkt"))
     os.remove(env.log)
     assert env.run().returncode == 0
-    assert env.loglines(started=True) == [
+    assert env.loglines(dirs=True) == [
         ("info", "processing directory %s" % env.dir)]
     env.cleanup()
     # not logged at the warn level
@@ -468,7 +468,7 @@ def several_directories():
     # a missing directory is an error, the others are processed
     r = env.run(dirs=[env.dir, missing, other])
     assert r.returncode == 1, r
-    lines = [l for l in env.loglines(started=True) if not l[1].startswith("truncated ")]
+    lines = [l for l in env.loglines(dirs=True) if not l[1].startswith("truncated ")]
     assert lines == [
         ("info", "processing directory %s" % env.dir),
         ("info", "processed 1.pkt: messages 1, modified 1"),
