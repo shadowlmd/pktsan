@@ -414,9 +414,10 @@ def log_level_warn():
     env.put("2.pkt", packet([pmsg(to=b"x" * 36)]))
     env.put("3.pkt", packet([pmsg()], tail=b"\0"))
     assert env.run().returncode == 0
-    assert env.loglines() == [
-        ("warn", "truncated toUserName to 35 bytes (was 36) in message #1 in 2.pkt"),
-        ("warn", "3.pkt: incomplete packet terminator after message #1 (1 byte at offset %d), kept as is" % (58 + len(pmsg())))]
+    # packets are processed in directory order
+    assert sorted(env.loglines()) == [
+        ("warn", "3.pkt: incomplete packet terminator after message #1 (1 byte at offset %d), kept as is" % (58 + len(pmsg()))),
+        ("warn", "truncated toUserName to 35 bytes (was 36) in message #1 in 2.pkt")]
     env.cleanup()
 
 
@@ -621,7 +622,7 @@ def temp_files_from_interrupted_run():
     assert env.run().returncode == 0
     assert env.files() == ["1.pkt", "2.PKT", "3.pkt"], env.files()
     assert env.get("1.pkt") == env.get("3.pkt") == reference(data)[0]
-    assert [l for l in env.loglines("warn") if "temporary" in l[1]] == [
+    assert sorted(l for l in env.loglines("warn") if "temporary" in l[1]) == [
         ("warn", "deleted incomplete temporary file 1.tr$"),
         ("warn", "deleted incomplete temporary file 2.TR$"),
         ("warn", "restored 3.pkt from temporary file 3.tr$")]

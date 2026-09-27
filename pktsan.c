@@ -625,11 +625,6 @@ done:
 /* ------------------------------------------------------------------ */
 /* Directory scanning                                                 */
 
-static int CmpStr(const void * a, const void * b)
-{
-    return strcmp(*(char * const *)a, *(char * const *)b);
-}
-
 static void AddName(char *** List, long * Count, long * Size, char * Name)
 {
     if(*Count == *Size)
@@ -712,11 +707,6 @@ static int ProcessDir(const char * Dir)
 
     closedir(d);
 
-    if(NTmps > 1)
-    {
-        qsort(Tmps, NTmps, sizeof(char *), CmpStr);
-    }
-
     /* temporary files left by an interrupted run */
     for(i = 0; i < NTmps; i++)
     {
@@ -758,11 +748,6 @@ static int ProcessDir(const char * Dir)
     }
 
     free(Tmps);
-
-    if(NPkts > 1)
-    {
-        qsort(Pkts, NPkts, sizeof(char *), CmpStr);
-    }
 
     for(i = 0; i < NPkts; i++)
     {
