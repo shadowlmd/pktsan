@@ -498,6 +498,22 @@ def config_handling():
 
 
 @test
+def relative_log_path():
+    env = Env(with_log=False)
+    with open(env.cfg, "a") as f:
+        f.write("LogFile rel.log\n")
+    env.put("1.pkt", packet([pmsg()]))
+    # config given by an absolute and by a relative path
+    for cfg in (env.cfg, os.path.join("..", os.path.basename(env.cfg))):
+        r = subprocess.run([EXE, "-c", cfg], cwd=env.dir, capture_output=True)
+        assert r.returncode == 0 and r.stdout == b"", r
+    assert env.files() == ["1.pkt"]
+    with open(os.path.join(env.root, "rel.log")) as f:
+        assert f.read().count("processed ") == 2
+    env.cleanup()
+
+
+@test
 def default_config_next_to_program():
     env = Env()
     bindir = os.path.join(env.root, "bin")

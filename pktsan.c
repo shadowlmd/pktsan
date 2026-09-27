@@ -159,22 +159,28 @@ static int HasExt(const char * Name, const char * Ext)
 /* ------------------------------------------------------------------ */
 /* Configuration                                                      */
 
-/* CONFIGNAME in the directory of the program */
-static char * ConfigPath(const char * Argv0)
+/* Name in the directory of Path: "dir/file" + Name -> "dir/Name" */
+static char * SameDir(const char * Path, const char * Name)
 {
-    size_t l = strlen(Argv0);
+    size_t l = strlen(Path);
     char * p;
 
-    while(l > 0 && Argv0[l - 1] != '/' && Argv0[l - 1] != '\\' &&
-          Argv0[l - 1] != ':')
+    while(l > 0 && Path[l - 1] != '/' && Path[l - 1] != '\\' &&
+          Path[l - 1] != ':')
     {
         l--;
     }
 
-    p = (char *)Alloc(l + strlen(CONFIGNAME) + 1);
-    memcpy(p, Argv0, l);
-    strcpy(p + l, CONFIGNAME);
+    p = (char *)Alloc(l + strlen(Name) + 1);
+    memcpy(p, Path, l);
+    strcpy(p + l, Name);
     return p;
+}
+
+static int IsAbsolute(const char * Path)
+{
+    return Path[0] == '/' || Path[0] == '\\' ||
+           (Path[0] != '\0' && Path[1] == ':');
 }
 
 static char * Trim(char * s)
@@ -246,8 +252,9 @@ static int ReadConfig(const char * Path, int Required, char ** LogFile)
 
         if(stricmp(Key, "LogFile") == 0 && *Val != '\0')
         {
+            /* a relative log path is relative to the config */
             free(*LogFile);
-            *LogFile = StrDup(Val);
+            *LogFile = IsAbsolute(Val) ? StrDup(Val) : SameDir(Path, Val);
         }
         else if(stricmp(Key, "LogLevel") == 0 && stricmp(Val, "info") == 0)
         {
@@ -439,6 +446,8 @@ static int WritePkt(const char * Path, const char * Tmp, const Trunc * Tr,
         return 0;
     }
 
+    errno = 0; /* fopen() may set it even on success */
+
     for(i = 0; Ok && i < TrCount; i++)
     {
         long Cut = Tr[i].len - (FieldSize[Tr[i].field] - 1);
@@ -483,6 +492,8 @@ static int ProcessPacket(const char * Path, const char * Tmp)
         Log(LOG_ERR, "can't read %s: %s, skipped", LPath, strerror(errno));
         goto done;
     }
+
+    errno = 0; /* fopen() may set it even on success */
 
     Msgs = ScanPacket(fh, &Size, &Tail, &B0, &B1, &Tr, &TrCount);
     Bad  = ferror(fh);
@@ -824,7 +835,8 @@ int main(int argc, char ** argv)
 
     if(Cfg == NULL)
     {
-        Cfg = ConfigPath(argv[0]);
+        /* CONFIGNAME in the directory of the program */
+        Cfg = SameDir(argv[0], CONFIGNAME);
     }
 
     if(ReadConfig(Cfg, CfgRequired, &LogFile) != 0)

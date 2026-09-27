@@ -19,7 +19,7 @@ pktsan runs before the tosser and truncates the strings.
   (unknown message type, missing or short packet terminator, data after the
   last message) is kept byte for byte.
 - Skips a file that is not a packet: shorter than a packet header (58
-  bytes), or no packed messages after the header.
+  bytes), or followed by neither packed messages nor a packet terminator.
 
 Packets are read as a stream: memory use does not depend on the packet
 size. A packet that needs no changes is not written to. A packet that needs
@@ -84,8 +84,8 @@ LogFile c:\ftn\log\pktsan.log
 LogLevel info
 ```
 
-- `LogFile`: log file, appended to. Default: console. May be in double
-  quotes.
+- `LogFile`: log file, appended to. Default: console. A relative path is
+  relative to the config directory. May be in double quotes.
 - `LogLevel`:
   - `info` (default): start directory, one line per packet, warnings,
     errors;
