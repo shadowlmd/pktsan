@@ -34,10 +34,19 @@ After an interrupted run, the next run:
 
 FastEcho runs the "External programs (After Unpack)" command (section
 5.4.12.1 of the manual) during `FastEcho TOSS` before tossing any packets,
-including when no bundles were unpacked. Enter pktsan there with the
-inbound, the unpack directory and the local inbound:
+including when no bundles were unpacked. The field is too short for the
+full command, so enter a batch file there:
 
 ```
+c:\ftn\pktsan\fastecho.bat
+```
+
+The batch file runs pktsan with the inbound, the unpack directory and the
+local inbound:
+
+```bat
+@echo off
+
 c:\ftn\pktsan\pktsan.exe c:\ftn\inbound c:\ftn\inbound\temp c:\ftn\inbound\local
 ```
 
