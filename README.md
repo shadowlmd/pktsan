@@ -10,8 +10,8 @@ pktsan runs before the tosser and truncates the strings.
 
 ## Processing
 
-- Processes every `*.pkt` file (extension in any case) in the current
-  directory.
+- Processes every `*.pkt` file (extension in any case) in the directories
+  given on the command line.
 - Truncates the strings to 35, 35 and 71 bytes in every message whose
   header can be read, including a last message cut off by the end of the
   file.
@@ -34,36 +34,27 @@ After an interrupted run, the next run:
 
 FastEcho runs the "External programs (After Unpack)" command (section
 5.4.12.1 of the manual) during `FastEcho TOSS` before tossing any packets,
-including when no bundles were unpacked. It does not change the current
-directory, so the command must be a batch file that runs pktsan in the
+including when no bundles were unpacked. Enter pktsan there with the
 inbound, the unpack directory and the local inbound:
 
 ```
-c:\ftn\pktsan\fastecho.bat
+c:\ftn\pktsan\pktsan.exe c:\ftn\inbound c:\ftn\inbound\temp c:\ftn\inbound\local
 ```
 
-```bat
-@echo off
-
-c:
-
-cd c:\ftn\inbound
-c:\ftn\pktsan\pktsan.exe
-
-cd c:\ftn\inbound\temp
-c:\ftn\pktsan\pktsan.exe
-
-cd c:\ftn\inbound\local
-c:\ftn\pktsan\pktsan.exe
-```
-
-Use the directories and the drive from your FastEcho setup.
+Use the directories from your FastEcho setup.
 
 ## Command line
 
 ```
-pktsan [-c config]
+pktsan [-c config] dir...
 ```
+
+- `dir`: a directory with packets; at least one. A relative path is relative
+  to the current directory.
+- `-c config`: the config file.
+- `-h`: help.
+
+Without a directory, pktsan prints the help and exits with code 1.
 
 The default config is `pktsan.cfg` in the program directory, or in the
 current directory if the program was started without a path. It is
@@ -86,7 +77,7 @@ LogLevel info
 - `LogFile`: log file, appended to. Default: console. A relative path is
   relative to the config directory. May be in double quotes.
 - `LogLevel`:
-  - `info` (default): start directory, one line per packet, warnings,
+  - `info` (default): each directory, one line per packet, warnings,
     errors;
   - `warn`: warnings and errors.
 
@@ -94,16 +85,18 @@ Lines starting with `;` or `#` are comments. Keywords are case-insensitive.
 
 ## Log
 
-- `[info]`: start directory and the result for each packet.
+- `[info]`: each directory and the result for each packet.
 - `[warn]`: a problem in a processed packet: truncated field, cut off
   message, unparsable data after the last message; also leftover temporary
   files.
-- `[err]`: a file was skipped: not a packet, or a read or write error.
+- `[err]`: a directory or a file was skipped: not a packet, or a read or
+  write error.
 
 File names are logged with the full path.
 
 ```
-2026-09-26 19:42:46 [info] pktsan 1.0 started in c:\ftn\inbound\temp
+2026-09-26 19:42:46 [info] processing directory c:\ftn\inbound
+2026-09-26 19:42:46 [info] processing directory c:\ftn\inbound\temp
 2026-09-26 19:42:46 [warn] truncated subject to 71 bytes (was 200) in message #32 in c:\ftn\inbound\temp\1234abcd.pkt
 2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\1234abcd.pkt: messages 40, modified 1
 2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\5678ef01.pkt: messages 12, modified 0
@@ -114,8 +107,8 @@ File names are logged with the full path.
 
 ## Building
 
-One C file; needs the standard C library, `dirent.h`, `utime()` and
-`getcwd()`.
+One C file; needs the standard C library, `dirent.h`, `utime()`,
+`getcwd()` and `getopt()`.
 
 ```
 gcc -O2 -static-libgcc -o pktsan.exe pktsan.c     (MinGW, Win32)

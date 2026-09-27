@@ -121,9 +121,12 @@ class Env:
         with open(os.path.join(self.dir, name), "rb") as f:
             return f.read()
 
-    def run(self, args=None, cwd=None, cfg=True):
-        cmd = [EXE] + (["-c", self.cfg] if cfg else []) + (args or [])
-        r = subprocess.run(cmd, cwd=cwd or self.dir, capture_output=True)
+    def run(self, args=None, cwd=None, cfg=True, dirs=None):
+        """Runs pktsan on dirs (default: the packet directory) from cwd
+        (default: its parent, so the current directory is not used)."""
+        cmd = [EXE] + (["-c", self.cfg] if cfg else []) + (args or []) + \
+            ([self.dir] if dirs is None else dirs)
+        r = subprocess.run(cmd, cwd=cwd or self.root, capture_output=True)
         if VERBOSE:
             print("   ", cmd, r.returncode, r.stdout, r.stderr)
         if b"Sanitizer" in r.stderr or b"runtime error" in r.stderr:
@@ -137,20 +140,20 @@ class Env:
             return f.read()
 
     def loglines(self, level=None, started=False):
-        """Log lines as (level, text); the start line only if started.
+        """Log lines as (level, text); "processing directory" lines only if started.
 
         Every file name must be logged with the full path of the directory,
         which is then removed from the text."""
-        prefix = os.path.realpath(self.dir) + "/"
+        prefix = self.dir + "/"
         res = []
         for line in self.logtext().splitlines():
             m = re.match(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d \[(\w+)\] (.*)$", line)
             assert m, "bad log line: %r" % line
             text = m.group(2)
             for f in re.findall(r"[^\s(]+\.(?:pkt|tr\$)", text, re.I):
-                assert f.startswith(prefix), "no full path: %r" % line
+                assert f.startswith(self.root + "/"), "no full path: %r" % line
             text = text.replace(prefix, "")
-            start = text.startswith("pktsan 1.0 started in ")
+            start = text.startswith("processing directory ")
             assert (m.group(1) == "info") == (start or text.startswith("processed ")), line
             if start and not started:
                 continue
@@ -305,7 +308,7 @@ def streaming_memory():
     data = packet([pmsg(subj=b"S" * 100, text=text), pmsg(to=b"T" * 40)])
     env.put("big.pkt", data)
     lim = 64 * 1024 * 1024
-    r = subprocess.run([EXE, "-c", env.cfg], cwd=env.dir, capture_output=True,
+    r = subprocess.run([EXE, "-c", env.cfg, env.dir], cwd=env.root, capture_output=True,
                        preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_AS, (lim, lim)))
     assert r.returncode == 0, r
     assert env.get("big.pkt") == reference(data)[0]
@@ -435,20 +438,61 @@ def start_line():
     env.put("1.pkt", packet([pmsg()]))
     assert env.run().returncode == 0
     assert env.loglines(started=True) == [
-        ("info", "pktsan 1.0 started in %s" % os.path.realpath(env.dir)),
+        ("info", "processing directory %s" % env.dir),
         ("info", "processed 1.pkt: messages 1, modified 0")]
     # logged even when there is nothing to process
     os.remove(os.path.join(env.dir, "1.pkt"))
     os.remove(env.log)
     assert env.run().returncode == 0
     assert env.loglines(started=True) == [
-        ("info", "pktsan 1.0 started in %s" % os.path.realpath(env.dir))]
+        ("info", "processing directory %s" % env.dir)]
     env.cleanup()
     # not logged at the warn level
     env = Env(cfg="LogLevel warn\n")
     env.put("1.pkt", packet([pmsg()]))
     assert env.run().returncode == 0
     assert env.logtext() == ""
+    env.cleanup()
+
+
+@test
+def several_directories():
+    env = Env()
+    env.put("1.pkt", packet([pmsg(to=b"x" * 40)]))
+    other = os.path.join(env.root, "other")
+    os.mkdir(other)
+    with open(os.path.join(other, "2.pkt"), "wb") as f:
+        f.write(packet([pmsg(subj=b"s" * 80)]))
+    missing = os.path.join(env.root, "missing")
+    # a missing directory is an error, the others are processed
+    r = env.run(dirs=[env.dir, missing, other])
+    assert r.returncode == 1, r
+    lines = [l for l in env.loglines(started=True) if not l[1].startswith("truncated ")]
+    assert lines == [
+        ("info", "processing directory %s" % env.dir),
+        ("info", "processed 1.pkt: messages 1, modified 1"),
+        ("info", "processing directory %s" % missing),
+        ("err", "can't read directory %s: No such file or directory" % missing),
+        ("info", "processing directory %s" % other),
+        ("info", "processed %s/2.pkt: messages 1, modified 1" % other)]
+    with open(os.path.join(other, "2.pkt"), "rb") as f:
+        assert f.read() == reference(packet([pmsg(subj=b"s" * 80)]))[0]
+    env.cleanup()
+
+
+@test
+def relative_directory():
+    env = Env()
+    env.put("1.pkt", packet([pmsg(to=b"x" * 40)]))
+    root = os.path.realpath(env.root)
+    for d, shown in (("in", root + "/in"), ("in/", root + "/in/"), (".", root + "/in")):
+        os.remove(env.log) if os.path.exists(env.log) else None
+        cwd = os.path.join(env.root, "in") if d == "." else env.root
+        assert env.run(dirs=[d], cwd=cwd).returncode == 0
+        text = env.logtext()
+        assert "processing directory %s\n" % shown in text, (d, text)
+        assert "processed %s/1.pkt: " % shown.rstrip("/") in text, (d, text)
+    assert env.get("1.pkt") == reference(packet([pmsg(to=b"x" * 40)]))[0]
     env.cleanup()
 
 
@@ -468,7 +512,7 @@ def config_handling():
     env.put("1.pkt", packet([pmsg(to=b"x" * 40)]))
     orig = env.get("1.pkt")
     # explicit missing config: error, nothing processed
-    r = subprocess.run([EXE, "-c", env.cfg + ".none"], cwd=env.dir, capture_output=True)
+    r = subprocess.run([EXE, "-c", env.cfg + ".none", env.dir], cwd=env.dir, capture_output=True)
     assert r.returncode == 1 and b"can't open config" in r.stderr
     # bad lines: error, nothing processed
     for bad in ("LogLevel debug\n", "Foo bar\n", "LogLevel\n"):
@@ -505,7 +549,7 @@ def relative_log_path():
     env.put("1.pkt", packet([pmsg()]))
     # config given by an absolute and by a relative path
     for cfg in (env.cfg, os.path.join("..", os.path.basename(env.cfg))):
-        r = subprocess.run([EXE, "-c", cfg], cwd=env.dir, capture_output=True)
+        r = subprocess.run([EXE, "-c", cfg, env.dir], cwd=env.dir, capture_output=True)
         assert r.returncode == 0 and r.stdout == b"", r
     assert env.files() == ["1.pkt"]
     with open(os.path.join(env.root, "rel.log")) as f:
@@ -523,22 +567,22 @@ def default_config_next_to_program():
     with open(os.path.join(bindir, "pktsan.cfg"), "w") as f:
         f.write("LogFile %s\nLogLevel info\n" % env.log)
     env.put("1.pkt", packet([pmsg(to=b"x" * 40)]))
-    r = subprocess.run([exe], cwd=env.dir, capture_output=True)
+    r = subprocess.run([exe, "."], cwd=env.dir, capture_output=True)
     assert r.returncode == 0 and r.stdout == b"", r
     assert "processed %s/1.pkt" % os.path.realpath(env.dir) in env.logtext()
     # started by a relative path: the config is still next to the program
     os.remove(env.log)
-    r = subprocess.run([os.path.join("..", "bin", "pktsan")], cwd=env.dir, capture_output=True)
+    r = subprocess.run([os.path.join("..", "bin", "pktsan"), "."], cwd=env.dir, capture_output=True)
     assert r.returncode == 0 and r.stdout == b"", r
     assert "processed %s/1.pkt" % os.path.realpath(env.dir) in env.logtext()
     # started without a path (found in PATH): the config is looked for
     # in the current directory
-    r = subprocess.run(["pktsan"], cwd=env.dir, capture_output=True,
+    r = subprocess.run(["pktsan", "."], cwd=env.dir, capture_output=True,
                        env=dict(os.environ, PATH=bindir))
     assert r.returncode == 0 and b"/1.pkt: messages 1" in r.stdout, r
     # no config at all: defaults, log to stdout
     os.remove(os.path.join(bindir, "pktsan.cfg"))
-    r = subprocess.run([exe], cwd=env.dir, capture_output=True)
+    r = subprocess.run([exe, "."], cwd=env.dir, capture_output=True)
     assert r.returncode == 0 and ("[info] processed %s/1.pkt: messages 1, modified 0"
                                   % os.path.realpath(env.dir)).encode() in r.stdout, r
     env.cleanup()
@@ -549,9 +593,19 @@ def arguments_rejected():
     env = Env()
     data = packet([pmsg(to=b"x" * 40)])
     env.put("1.pkt", data)
-    for args in ([env.dir], ["."], ["-x"], ["-c"], ["-c", env.cfg, "."]):
+    # no directories: help on stderr
+    for args in ([], ["-c", env.cfg]):
         r = subprocess.run([EXE] + args, cwd=env.dir, capture_output=True)
-        assert r.returncode == 1 and b"unknown argument" in r.stderr, (args, r)
+        assert r.returncode == 1 and b"Usage: pktsan [-c config] dir..." in r.stderr, (args, r)
+        assert r.stdout == b"", r
+    # bad options: getopt's message
+    for args in (["-x", env.dir], ["-c"]):
+        r = subprocess.run([EXE] + args, cwd=env.dir, capture_output=True)
+        assert r.returncode == 1 and r.stderr and b"Usage" not in r.stderr, (args, r)
+    assert env.get("1.pkt") == data and env.logtext() == ""
+    # help
+    r = subprocess.run([EXE, "-h", env.dir], cwd=env.dir, capture_output=True)
+    assert r.returncode == 0 and b"Usage: pktsan [-c config] dir..." in r.stdout, r
     assert env.get("1.pkt") == data and env.logtext() == ""
     env.cleanup()
 

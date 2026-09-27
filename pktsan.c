@@ -52,7 +52,6 @@
 
 static FILE * LogFh    = NULL;
 static int    LogLevel = LOG_INFO;
-static char   Cwd[1024];            /* the current directory, "" if unknown */
 
 static const char * FieldName[3] = { "toUserName", "fromUserName", "subject" };
 static const long   FieldSize[3] = { 36, 36, 72 };
@@ -128,19 +127,19 @@ static char * ChangeExt(const char * Name, const char * Ext)
 }
 
 /*
- * Name in the current directory with its full path, for the log. The
- * separator follows getcwd(): DJGPP returns c:/dir, MinGW returns C:\dir.
+ * Dir + separator + Name. The separator follows Dir: DJGPP's getcwd()
+ * returns c:/dir, MinGW's returns C:\dir.
  */
-static char * FullPath(const char * Name)
+static char * JoinPath(const char * Dir, const char * Name)
 {
-    size_t l = strlen(Cwd);
-    char Sep = (strchr(Cwd, '\\') != NULL && strchr(Cwd, '/') == NULL) ?
+    size_t l = strlen(Dir);
+    char Sep = (strchr(Dir, '\\') != NULL && strchr(Dir, '/') == NULL) ?
                '\\' : '/';
     char * p = (char *)Alloc(l + 1 + strlen(Name) + 1);
 
-    strcpy(p, Cwd);
+    strcpy(p, Dir);
 
-    if(l > 0 && Cwd[l - 1] != Sep)
+    if(l > 0 && Dir[l - 1] != Sep && Dir[l - 1] != ':')
     {
         p[l++] = Sep;
     }
@@ -181,6 +180,19 @@ static int IsAbsolute(const char * Path)
 {
     return Path[0] == '/' || Path[0] == '\\' ||
            (Path[0] != '\0' && Path[1] == ':');
+}
+
+/* Dir with the current directory prepended if it is relative */
+static char * DirPath(const char * Dir)
+{
+    char Cwd[1024];
+
+    if(IsAbsolute(Dir) || getcwd(Cwd, sizeof(Cwd)) == NULL)
+    {
+        return StrDup(Dir);
+    }
+
+    return strcmp(Dir, ".") == 0 ? StrDup(Cwd) : JoinPath(Cwd, Dir);
 }
 
 static char * Trim(char * s)
@@ -463,7 +475,7 @@ static int WritePkt(const char * Path, const char * Tmp, const Trunc * Tr,
     return Ok && stat(Tmp, &st) == 0 && (long)st.st_size == OutLen;
 }
 
-/* Returns 0 on success (changed or not), 1 on error. */
+/* Path and Tmp include the directory. Returns 0 on success, 1 on error. */
 static int ProcessPacket(const char * Path, const char * Tmp)
 {
     struct stat st;
@@ -473,14 +485,12 @@ static int ProcessPacket(const char * Path, const char * Tmp)
     int B0, B1, Bad;
     struct utimbuf ut;
     int Rc = 1;
-    char * LPath = FullPath(Path);
-    char * LTmp  = FullPath(Tmp);
 
     errno = 0;
 
     if(stat(Path, &st) != 0)
     {
-        Log(LOG_ERR, "can't stat %s: %s, skipped", LPath, strerror(errno));
+        Log(LOG_ERR, "can't stat %s: %s, skipped", Path, strerror(errno));
         goto done;
     }
 
@@ -489,7 +499,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 
     if(fh == NULL)
     {
-        Log(LOG_ERR, "can't read %s: %s, skipped", LPath, strerror(errno));
+        Log(LOG_ERR, "can't read %s: %s, skipped", Path, strerror(errno));
         goto done;
     }
 
@@ -501,7 +511,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 
     if(Bad)
     {
-        Log(LOG_ERR, "can't read %s: %s, skipped", LPath,
+        Log(LOG_ERR, "can't read %s: %s, skipped", Path,
             errno ? strerror(errno) : "read error");
         goto done;
     }
@@ -509,7 +519,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
     if(Size < PKT_HDR_SIZE)
     {
         Log(LOG_ERR, "%s is not a packet: only %ld bytes, shorter than a packet "
-            "header, skipped", LPath, Size);
+            "header, skipped", Path, Size);
         goto done;
     }
 
@@ -522,40 +532,40 @@ static int ProcessPacket(const char * Path, const char * Tmp)
     else if(Msgs == 0)
     {
         Log(LOG_ERR, "%s is not a packet: no packed messages after the packet "
-            "header (%ld bytes of unknown data at offset %ld), skipped", LPath,
+            "header (%ld bytes of unknown data at offset %ld), skipped", Path,
             Rest, Tail);
         goto done;
     }
     else if(B0 == 2 && B1 == 0)
     {
         Log(LOG_WARN, "%s: message #%ld (offset %ld) is cut off by the end of "
-            "the file, its unterminated part is kept as is", LPath, Msgs, Tail);
+            "the file, its unterminated part is kept as is", Path, Msgs, Tail);
     }
     else if(Rest == 0)
     {
         Log(LOG_WARN, "%s: no packet terminator, the file ends right after "
-            "message #%ld", LPath, Msgs);
+            "message #%ld", Path, Msgs);
     }
     else if(Rest == 1 && B0 == 0)
     {
         Log(LOG_WARN, "%s: incomplete packet terminator after message #%ld "
-            "(1 byte at offset %ld), kept as is", LPath, Msgs, Tail);
+            "(1 byte at offset %ld), kept as is", Path, Msgs, Tail);
     }
     else if(Rest > 2 && B0 == 0 && B1 == 0)
     {
         Log(LOG_WARN, "%s: %ld bytes of unknown data after the packet "
-            "terminator (offset %ld), kept as is", LPath, Rest - 2, Tail + 2);
+            "terminator (offset %ld), kept as is", Path, Rest - 2, Tail + 2);
     }
     else
     {
         Log(LOG_WARN, "%s: unknown data instead of a packet terminator after "
             "message #%ld (%ld bytes at offset %ld), kept as is without "
-            "parsing", LPath, Msgs, Rest, Tail);
+            "parsing", Path, Msgs, Rest, Tail);
     }
 
     if(TrCount == 0)
     {
-        Log(LOG_INFO, "processed %s: messages %ld, modified 0", LPath, Msgs);
+        Log(LOG_INFO, "processed %s: messages %ld, modified 0", Path, Msgs);
         Rc = 0;
         goto done;
     }
@@ -571,8 +581,8 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 
     if(!WritePkt(Path, Tmp, Tr, TrCount, OutLen))
     {
-        Log(LOG_ERR, "can't write %s: %s, %s skipped", LTmp,
-            errno ? strerror(errno) : "read or write error", LPath);
+        Log(LOG_ERR, "can't write %s: %s, %s skipped", Tmp,
+            errno ? strerror(errno) : "read or write error", Path);
         remove(Tmp);
         goto done;
     }
@@ -581,7 +591,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 
     if(remove(Path) != 0)
     {
-        Log(LOG_ERR, "can't delete %s: %s, skipped", LPath,
+        Log(LOG_ERR, "can't delete %s: %s, skipped", Path,
             strerror(errno));
         remove(Tmp);
         goto done;
@@ -591,8 +601,8 @@ static int ProcessPacket(const char * Path, const char * Tmp)
     {
         /* Tmp is complete: it is renamed back on the next run */
         Log(LOG_ERR, "can't rename %s to %s: %s, the processed packet is "
-            "restored from %s on the next run", LTmp, LPath, strerror(errno),
-            LTmp);
+            "restored from %s on the next run", Tmp, Path, strerror(errno),
+            Tmp);
         goto done;
     }
 
@@ -602,7 +612,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 
     if(utime(Path, &ut) != 0)
     {
-        Log(LOG_WARN, "can't restore the file time of %s: %s", LPath,
+        Log(LOG_WARN, "can't restore the file time of %s: %s", Path,
             strerror(errno));
     }
 
@@ -610,7 +620,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
     {
         Log(LOG_WARN, "truncated %s to %ld bytes (was %ld) in message #%ld "
             "in %s", FieldName[Tr[i].field], FieldSize[Tr[i].field] - 1,
-            Tr[i].len, Tr[i].msg, LPath);
+            Tr[i].len, Tr[i].msg, Path);
     }
 
     /* truncations are in message order */
@@ -619,14 +629,12 @@ static int ProcessPacket(const char * Path, const char * Tmp)
         Mod += (i == 0 || Tr[i].msg != Tr[i - 1].msg);
     }
 
-    Log(LOG_INFO, "processed %s: messages %ld, modified %ld", LPath, Msgs,
+    Log(LOG_INFO, "processed %s: messages %ld, modified %ld", Path, Msgs,
         Mod);
     Rc = 0;
 
 done:
     free(Tr);
-    free(LPath);
-    free(LTmp);
     return Rc;
 }
 
@@ -674,37 +682,25 @@ static long FindName(char ** List, long Count, const char * Name)
     return -1;
 }
 
-/* Processes the current directory. Returns the number of errors. */
-static int ProcessDir(void)
+/* Processes directory Arg. Returns the number of errors. */
+static int ProcessDir(const char * Arg)
 {
     char ** Pkts = NULL;
     char ** Tmps = NULL;
     long NPkts = 0, SPkts = 0, NTmps = 0, STmps = 0, i;
     int Errors = 0;
+    char * Dir = DirPath(Arg);
     DIR * d;
     struct dirent * de;
 
+    Log(LOG_INFO, "processing directory %s", Dir);
     errno = 0;
-
-    if(getcwd(Cwd, sizeof(Cwd)) != NULL)
-    {
-        Log(LOG_INFO, PROGNAME " " VERSION " started in %s", Cwd);
-    }
-    else
-    {
-        Cwd[0] = '\0';
-        Log(LOG_WARN, PROGNAME " " VERSION " started in the current directory, "
-            "can't get its name: %s, file names are logged without a path",
-            strerror(errno));
-    }
-
-    errno = 0;
-    d = opendir(".");
+    d = opendir(Dir);
 
     if(d == NULL)
     {
-        Log(LOG_ERR, "can't read the current directory%s%s: %s",
-            Cwd[0] ? " " : "", Cwd, strerror(errno));
+        Log(LOG_ERR, "can't read directory %s: %s", Dir, strerror(errno));
+        free(Dir);
         return 1;
     }
 
@@ -714,9 +710,10 @@ static int ProcessDir(void)
 
         if(Pkt || HasExt(de->d_name, ".tr$"))
         {
+            char * Path = JoinPath(Dir, de->d_name);
             struct stat st;
             /* a packet that can't be stat'ed is logged when processed */
-            int Reg = stat(de->d_name, &st) != 0 || S_ISREG(st.st_mode);
+            int Reg = stat(Path, &st) != 0 || S_ISREG(st.st_mode);
 
             if(Reg && Pkt)
             {
@@ -726,6 +723,8 @@ static int ProcessDir(void)
             {
                 AddName(&Tmps, &NTmps, &STmps, StrDup(de->d_name));
             }
+
+            free(Path);
         }
     }
 
@@ -739,42 +738,41 @@ static int ProcessDir(void)
     /* temporary files left by an interrupted run */
     for(i = 0; i < NTmps; i++)
     {
-        char * Tmp   = Tmps[i];
-        char * Name  = ChangeExt(Tmp, ".pkt");
-        char * LTmp  = FullPath(Tmp);
-        char * LName = FullPath(Name);
+        char * Name  = ChangeExt(Tmps[i], ".pkt");
+        char * PTmp  = JoinPath(Dir, Tmps[i]);
+        char * PName = JoinPath(Dir, Name);
 
         if(FindName(Pkts, NPkts, Name) >= 0)
         {
-            if(remove(Tmp) == 0)
+            if(remove(PTmp) == 0)
             {
-                Log(LOG_WARN, "deleted incomplete temporary file %s", LTmp);
+                Log(LOG_WARN, "deleted incomplete temporary file %s", PTmp);
             }
             else
             {
-                Log(LOG_ERR, "can't delete temporary file %s: %s", LTmp,
+                Log(LOG_ERR, "can't delete temporary file %s: %s", PTmp,
                     strerror(errno));
                 Errors++;
             }
 
             free(Name);
         }
-        else if(rename(Tmp, Name) == 0)
+        else if(rename(PTmp, PName) == 0)
         {
-            Log(LOG_WARN, "restored %s from temporary file %s", LName, LTmp);
+            Log(LOG_WARN, "restored %s from temporary file %s", PName, PTmp);
             AddName(&Pkts, &NPkts, &SPkts, Name);
         }
         else
         {
             Log(LOG_ERR, "can't restore %s from temporary file %s: %s, "
-                "retried on the next run", LName, LTmp, strerror(errno));
+                "retried on the next run", PName, PTmp, strerror(errno));
             Errors++;
             free(Name);
         }
 
-        free(LTmp);
-        free(LName);
-        free(Tmp);
+        free(PTmp);
+        free(PName);
+        free(Tmps[i]);
     }
 
     free(Tmps);
@@ -786,26 +784,31 @@ static int ProcessDir(void)
 
     for(i = 0; i < NPkts; i++)
     {
-        char * Tmp = ChangeExt(Pkts[i], ".tr$");
+        char * Tmp   = ChangeExt(Pkts[i], ".tr$");
+        char * PPkt  = JoinPath(Dir, Pkts[i]);
+        char * PTmp  = JoinPath(Dir, Tmp);
 
-        Errors += ProcessPacket(Pkts[i], Tmp);
+        Errors += ProcessPacket(PPkt, PTmp);
+        free(PPkt);
+        free(PTmp);
         free(Tmp);
         free(Pkts[i]);
     }
 
     free(Pkts);
+    free(Dir);
     return Errors;
 }
 
 /* ------------------------------------------------------------------ */
 
-static void Usage(void)
+static void Usage(FILE * fh)
 {
-    printf("PKT Sanitizer " VERSION " - truncate too long names and subjects "
-           "in FTS-0001 packets\n\n"
-           "Usage: " PROGNAME " [-c config]\n\n"
-           "Processes all *.pkt files in the current directory. The default\n"
-           "config is " CONFIGNAME " in the program directory.\n");
+    fprintf(fh, "PKT Sanitizer " VERSION " - truncate too long names and "
+            "subjects in FTS-0001 packets\n\n"
+            "Usage: " PROGNAME " [-c config] dir...\n\n"
+            "Processes all *.pkt files in the given directories. The default\n"
+            "config is " CONFIGNAME " in the program directory.\n");
 }
 
 int main(int argc, char ** argv)
@@ -814,28 +817,34 @@ int main(int argc, char ** argv)
     char * LogFile = NULL;
     int CfgRequired = 0;
     int Errors = 0;
-    int i;
+    int c, i;
 
-    for(i = 1; i < argc; i++)
+    while((c = getopt(argc, argv, "c:h")) != -1)
     {
-        if(strcmp(argv[i], "-c") == 0 && i + 1 < argc)
+        switch(c)
         {
-            free(Cfg);
-            Cfg = StrDup(argv[++i]);
-            CfgRequired = 1;
+            case 'c':
+                free(Cfg);
+                Cfg = StrDup(optarg);
+                CfgRequired = 1;
+                break;
+
+            case 'h':
+                free(Cfg);
+                Usage(stdout);
+                return 0;
+
+            default: /* getopt() has printed the error */
+                free(Cfg);
+                return 1;
         }
-        else if(strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "-?") == 0 ||
-                strcmp(argv[i], "--help") == 0)
-        {
-            Usage();
-            return 0;
-        }
-        else
-        {
-            fprintf(stderr, PROGNAME ": unknown argument '%s'\n", argv[i]);
-            free(Cfg);
-            return 1;
-        }
+    }
+
+    if(optind == argc)
+    {
+        free(Cfg);
+        Usage(stderr);
+        return 1;
     }
 
     if(Cfg == NULL)
@@ -865,7 +874,10 @@ int main(int argc, char ** argv)
         }
     }
 
-    Errors = ProcessDir();
+    for(i = optind; i < argc; i++)
+    {
+        Errors += ProcessDir(argv[i]);
+    }
 
     if(LogFh != NULL)
     {
