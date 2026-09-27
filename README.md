@@ -49,8 +49,7 @@ Use the directories from your FastEcho setup.
 pktsan [-c config] dir...
 ```
 
-- `dir`: a directory with packets; at least one. A relative path is relative
-  to the current directory.
+- `dir`: a directory with packets; at least one.
 - `-c config`: the config file.
 - `-h`: help.
 
@@ -92,7 +91,7 @@ Lines starting with `;` or `#` are comments. Keywords are case-insensitive.
 - `[err]`: a directory or a file was skipped: not a packet, or a read or
   write error.
 
-File names are logged with the full path.
+File names are logged with the directory as given on the command line.
 
 ```
 2026-09-26 19:42:46 [info] processing directory c:\ftn\inbound

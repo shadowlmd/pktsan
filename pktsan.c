@@ -126,10 +126,7 @@ static char * ChangeExt(const char * Name, const char * Ext)
     return p;
 }
 
-/*
- * Dir + separator + Name. The separator follows Dir: DJGPP's getcwd()
- * returns c:/dir, MinGW's returns C:\dir.
- */
+/* Dir + separator + Name; the separator follows the style of Dir */
 static char * JoinPath(const char * Dir, const char * Name)
 {
     size_t l = strlen(Dir);
@@ -180,19 +177,6 @@ static int IsAbsolute(const char * Path)
 {
     return Path[0] == '/' || Path[0] == '\\' ||
            (Path[0] != '\0' && Path[1] == ':');
-}
-
-/* Dir with the current directory prepended if it is relative */
-static char * DirPath(const char * Dir)
-{
-    char Cwd[1024];
-
-    if(IsAbsolute(Dir) || getcwd(Cwd, sizeof(Cwd)) == NULL)
-    {
-        return StrDup(Dir);
-    }
-
-    return strcmp(Dir, ".") == 0 ? StrDup(Cwd) : JoinPath(Cwd, Dir);
 }
 
 static char * Trim(char * s)
@@ -682,14 +666,13 @@ static long FindName(char ** List, long Count, const char * Name)
     return -1;
 }
 
-/* Processes directory Arg. Returns the number of errors. */
-static int ProcessDir(const char * Arg)
+/* Processes directory Dir. Returns the number of errors. */
+static int ProcessDir(const char * Dir)
 {
     char ** Pkts = NULL;
     char ** Tmps = NULL;
     long NPkts = 0, SPkts = 0, NTmps = 0, STmps = 0, i;
     int Errors = 0;
-    char * Dir = DirPath(Arg);
     DIR * d;
     struct dirent * de;
 
@@ -700,7 +683,6 @@ static int ProcessDir(const char * Arg)
     if(d == NULL)
     {
         Log(LOG_ERR, "can't read directory %s: %s", Dir, strerror(errno));
-        free(Dir);
         return 1;
     }
 
@@ -796,7 +778,6 @@ static int ProcessDir(const char * Arg)
     }
 
     free(Pkts);
-    free(Dir);
     return Errors;
 }
 

@@ -482,16 +482,16 @@ def several_directories():
 
 @test
 def relative_directory():
+    """The directory is used and logged as given."""
     env = Env()
     env.put("1.pkt", packet([pmsg(to=b"x" * 40)]))
-    root = os.path.realpath(env.root)
-    for d, shown in (("in", root + "/in"), ("in/", root + "/in/"), (".", root + "/in")):
-        os.remove(env.log) if os.path.exists(env.log) else None
-        cwd = os.path.join(env.root, "in") if d == "." else env.root
+    for d, cwd in (("in", env.root), ("in/", env.root), (".", env.dir)):
+        if os.path.exists(env.log):
+            os.remove(env.log)
         assert env.run(dirs=[d], cwd=cwd).returncode == 0
         text = env.logtext()
-        assert "processing directory %s\n" % shown in text, (d, text)
-        assert "processed %s/1.pkt: " % shown.rstrip("/") in text, (d, text)
+        assert "processing directory %s\n" % d in text, (d, text)
+        assert "processed %s: " % os.path.join(d, "1.pkt") in text, (d, text)
     assert env.get("1.pkt") == reference(packet([pmsg(to=b"x" * 40)]))[0]
     env.cleanup()
 
@@ -569,12 +569,12 @@ def default_config_next_to_program():
     env.put("1.pkt", packet([pmsg(to=b"x" * 40)]))
     r = subprocess.run([exe, "."], cwd=env.dir, capture_output=True)
     assert r.returncode == 0 and r.stdout == b"", r
-    assert "processed %s/1.pkt" % os.path.realpath(env.dir) in env.logtext()
+    assert "processed ./1.pkt" in env.logtext()
     # started by a relative path: the config is still next to the program
     os.remove(env.log)
     r = subprocess.run([os.path.join("..", "bin", "pktsan"), "."], cwd=env.dir, capture_output=True)
     assert r.returncode == 0 and r.stdout == b"", r
-    assert "processed %s/1.pkt" % os.path.realpath(env.dir) in env.logtext()
+    assert "processed ./1.pkt" in env.logtext()
     # started without a path (found in PATH): the config is looked for
     # in the current directory
     r = subprocess.run(["pktsan", "."], cwd=env.dir, capture_output=True,
@@ -583,8 +583,7 @@ def default_config_next_to_program():
     # no config at all: defaults, log to stdout
     os.remove(os.path.join(bindir, "pktsan.cfg"))
     r = subprocess.run([exe, "."], cwd=env.dir, capture_output=True)
-    assert r.returncode == 0 and ("[info] processed %s/1.pkt: messages 1, modified 0"
-                                  % os.path.realpath(env.dir)).encode() in r.stdout, r
+    assert r.returncode == 0 and b"[info] processed ./1.pkt: messages 1, modified 0" in r.stdout, r
     env.cleanup()
 
 
@@ -666,7 +665,7 @@ def broken_symlink_is_logged():
     assert r.returncode == 1
     assert env.loglines() == [
         ("err", "can't stat 1.pkt: No such file or directory, skipped")], env.logtext()
-    assert "can't stat %s/1.pkt:" % os.path.realpath(env.dir) in env.logtext()
+    assert "can't stat %s/1.pkt:" % env.dir in env.logtext()
     env.cleanup()
 
 
