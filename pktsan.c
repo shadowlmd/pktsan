@@ -547,6 +547,56 @@ static char * PktName(const char * Path, const unsigned char * Hdr)
     return s;
 }
 
+/*
+ * Writes the truncated packet Path to Tmp, replaces Path with it and
+ * restores the file time from st. Name is Path for the log. Returns 0 on
+ * error.
+ */
+static int ReplacePkt(const char * Path, const char * Tmp, const char * Name,
+                      const Scan * S, const struct stat * st)
+{
+    struct utimbuf ut;
+
+    if(!WritePkt(Path, Tmp, S))
+    {
+        Log(LOG_ERR, "can't write %s: %s, %s skipped", Tmp,
+            errno ? strerror(errno) : "read or write error", Name);
+        remove(Tmp);
+        return 0;
+    }
+
+    errno = 0;
+
+    if(remove(Path) != 0)
+    {
+        Log(LOG_ERR, "can't delete %s: %s, skipped", Name,
+            strerror(errno));
+        remove(Tmp);
+        return 0;
+    }
+
+    if(rename(Tmp, Path) != 0)
+    {
+        /* Tmp is complete: it is renamed back on the next run */
+        Log(LOG_ERR, "can't rename %s to %s: %s, the processed packet is "
+            "restored from %s on the next run", Tmp, Name, strerror(errno),
+            Tmp);
+        return 0;
+    }
+
+    ut.actime  = st->st_atime;
+    ut.modtime = st->st_mtime;
+    errno = 0;
+
+    if(utime(Path, &ut) != 0)
+    {
+        Log(LOG_WARN, "can't restore the file time of %s: %s", Name,
+            strerror(errno));
+    }
+
+    return 1;
+}
+
 /* Path and Tmp include the directory. Returns 0 on success, 1 on error. */
 static int ProcessPacket(const char * Path, const char * Tmp)
 {
@@ -555,7 +605,6 @@ static int ProcessPacket(const char * Path, const char * Tmp)
     Scan S;
     long Rest, i;
     int Bad;
-    struct utimbuf ut;
     char * Name = NULL;   /* Path with the addresses, once the header is read */
     int Rc = 1;
 
@@ -640,50 +689,9 @@ static int ProcessPacket(const char * Path, const char * Tmp)
             "parsing", Name, S.Msgs, Rest, S.Tail);
     }
 
-    if(S.TrCount == 0)
+    if(S.TrCount > 0 && !ReplacePkt(Path, Tmp, Name, &S, &st))
     {
-        Log(LOG_INFO, "processed %s: messages %ld, modified 0", Name, S.Msgs);
-        Rc = 0;
         goto done;
-    }
-
-    errno = 0;
-
-    if(!WritePkt(Path, Tmp, &S))
-    {
-        Log(LOG_ERR, "can't write %s: %s, %s skipped", Tmp,
-            errno ? strerror(errno) : "read or write error", Name);
-        remove(Tmp);
-        goto done;
-    }
-
-    errno = 0;
-
-    if(remove(Path) != 0)
-    {
-        Log(LOG_ERR, "can't delete %s: %s, skipped", Name,
-            strerror(errno));
-        remove(Tmp);
-        goto done;
-    }
-
-    if(rename(Tmp, Path) != 0)
-    {
-        /* Tmp is complete: it is renamed back on the next run */
-        Log(LOG_ERR, "can't rename %s to %s: %s, the processed packet is "
-            "restored from %s on the next run", Tmp, Name, strerror(errno),
-            Tmp);
-        goto done;
-    }
-
-    ut.actime  = st.st_atime;
-    ut.modtime = st.st_mtime;
-    errno = 0;
-
-    if(utime(Path, &ut) != 0)
-    {
-        Log(LOG_WARN, "can't restore the file time of %s: %s", Name,
-            strerror(errno));
     }
 
     for(i = 0; i < S.TrCount; i++)
