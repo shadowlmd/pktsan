@@ -367,16 +367,18 @@ static void ScanPacket(FILE * fh, Scan * S)
 
             if(S->TrCount == TrAlloc)
             {
-                TrAlloc = TrAlloc ? TrAlloc * 2 : 16;
-                t = (Trunc *)realloc(S->Tr, TrAlloc * sizeof(Trunc));
+                Trunc * p;
 
-                if(t == NULL)
+                TrAlloc = TrAlloc ? TrAlloc * 2 : 16;
+                p = (Trunc *)realloc(S->Tr, TrAlloc * sizeof(Trunc));
+
+                if(p == NULL)
                 {
                     fprintf(stderr, PROGNAME ": out of memory\n");
                     exit(1);
                 }
 
-                S->Tr = t;
+                S->Tr = p;
             }
 
             if(S->TrCount == 0 || S->Tr[S->TrCount - 1].msg != S->Msgs)
