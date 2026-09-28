@@ -62,7 +62,22 @@ typedef struct
     int  field;    /* index in FieldName */
     long len;      /* original length without the null */
     long at;       /* offset of the first byte cut off */
+    long cut;      /* number of bytes cut off */
 } Trunc;
+
+/* The result of ScanPacket() */
+typedef struct
+{
+    unsigned char Hdr[PKT_HDR_SIZE]; /* packet header, if Size allows */
+    long    Size;     /* file size */
+    long    Tail;     /* offset after the last complete message */
+    int     B0, B1;   /* first two bytes at Tail, EOF if none */
+    long    Msgs;     /* messages, a cut off one included */
+    long    Mod;      /* messages with truncated strings */
+    long    OutLen;   /* file size after truncation */
+    Trunc * Tr;       /* truncations in file order (allocated) */
+    long    TrCount;
+} Scan;
 
 /* ------------------------------------------------------------------ */
 
@@ -276,31 +291,26 @@ static int ReadConfig(const char * Path, int Required, char ** LogFile)
 /* Packet processing                                                  */
 
 /*
- * Reads the packet and finds the strings to truncate. Truncations are
- * stored to *Tr (allocated) in file order, their number to *TrCount.
- * A message cut off by the end of the file is counted too, and its complete
- * strings are truncated. *Size is the file size, *Tail the offset of the
- * data after the last complete message (the start of the cut off message,
- * if any), *B0 and *B1 the first two bytes there (EOF if none). The packet
- * header is stored to Hdr (PKT_HDR_SIZE bytes). Returns the number of
- * messages.
+ * Reads the packet and finds the strings to truncate. A message cut off by
+ * the end of the file is counted too, and its complete strings are
+ * truncated; the start of such a message is the Tail.
  */
-static long ScanPacket(FILE * fh, unsigned char * Hdr, long * Size,
-                       long * Tail, int * B0, int * B1, Trunc ** Tr,
-                       long * TrCount)
+static void ScanPacket(FILE * fh, Scan * S)
 {
-    long pos = 0, Msgs = 0, TrAlloc = 0;
+    long pos = 0, TrAlloc = 0, Cut = 0;
     int c;
 
-    *Tr      = NULL;
-    *TrCount = 0;
-    *Tail    = 0;
-    *B0      = EOF;
-    *B1      = EOF;
+    S->Tr      = NULL;
+    S->TrCount = 0;
+    S->Msgs    = 0;
+    S->Mod     = 0;
+    S->Tail    = 0;
+    S->B0      = EOF;
+    S->B1      = EOF;
 
     while(pos < PKT_HDR_SIZE && (c = getc(fh)) != EOF)
     {
-        Hdr[pos++] = (unsigned char)c;
+        S->Hdr[pos++] = (unsigned char)c;
     }
 
     /* packed messages, if the header is complete; left by break */
@@ -309,17 +319,17 @@ static long ScanPacket(FILE * fh, unsigned char * Hdr, long * Size,
         long Start = pos;
         int i;
 
-        *Tail = Start;
-        *B0   = getc(fh);
-        *B1   = (*B0 == EOF) ? EOF : getc(fh);
-        pos  += (*B0 != EOF) + (*B1 != EOF);
+        S->Tail = Start;
+        S->B0   = getc(fh);
+        S->B1   = (S->B0 == EOF) ? EOF : getc(fh);
+        pos    += (S->B0 != EOF) + (S->B1 != EOF);
 
-        if(*B0 != 2 || *B1 != 0)
+        if(S->B0 != 2 || S->B1 != 0)
         {
             break;
         }
 
-        Msgs++;
+        S->Msgs++;
 
         while(pos - Start < MSG_HDR_SIZE && getc(fh) != EOF)
         {
@@ -335,6 +345,7 @@ static long ScanPacket(FILE * fh, unsigned char * Hdr, long * Size,
         {
             long f = pos;
             long l;
+            Trunc * t;
 
             while((c = getc(fh)) != EOF && c != 0)
             {
@@ -349,30 +360,37 @@ static long ScanPacket(FILE * fh, unsigned char * Hdr, long * Size,
             pos++;
             l = pos - 1 - f;
 
-            if(i < 3 && l > FieldSize[i] - 1)
+            if(i == 3 || l <= FieldSize[i] - 1)
             {
-                if(*TrCount == TrAlloc)
+                continue;
+            }
+
+            if(S->TrCount == TrAlloc)
+            {
+                TrAlloc = TrAlloc ? TrAlloc * 2 : 16;
+                t = (Trunc *)realloc(S->Tr, TrAlloc * sizeof(Trunc));
+
+                if(t == NULL)
                 {
-                    Trunc * t;
-
-                    TrAlloc = TrAlloc ? TrAlloc * 2 : 16;
-                    t = (Trunc *)realloc(*Tr, TrAlloc * sizeof(Trunc));
-
-                    if(t == NULL)
-                    {
-                        fprintf(stderr, PROGNAME ": out of memory\n");
-                        exit(1);
-                    }
-
-                    *Tr = t;
+                    fprintf(stderr, PROGNAME ": out of memory\n");
+                    exit(1);
                 }
 
-                (*Tr)[*TrCount].msg   = Msgs;
-                (*Tr)[*TrCount].field = i;
-                (*Tr)[*TrCount].len   = l;
-                (*Tr)[*TrCount].at    = f + FieldSize[i] - 1;
-                (*TrCount)++;
+                S->Tr = t;
             }
+
+            if(S->TrCount == 0 || S->Tr[S->TrCount - 1].msg != S->Msgs)
+            {
+                S->Mod++;
+            }
+
+            t        = &S->Tr[S->TrCount++];
+            t->msg   = S->Msgs;
+            t->field = i;
+            t->len   = l;
+            t->at    = f + FieldSize[i] - 1;
+            t->cut   = l - (FieldSize[i] - 1);
+            Cut     += t->cut;
         }
 
         if(i < 4)
@@ -386,8 +404,8 @@ static long ScanPacket(FILE * fh, unsigned char * Hdr, long * Size,
         pos++;
     }
 
-    *Size = pos;
-    return Msgs;
+    S->Size   = pos;
+    S->OutLen = pos - Cut;
 }
 
 /* Copies N bytes (all the rest if N < 0) from In to Out (skips if NULL) */
@@ -420,8 +438,7 @@ static int CopyBytes(FILE * In, FILE * Out, long N)
 }
 
 /* Writes packet Path without the truncated bytes to Tmp */
-static int WritePkt(const char * Path, const char * Tmp, const Trunc * Tr,
-                    long TrCount, long OutLen)
+static int WritePkt(const char * Path, const char * Tmp, const Scan * S)
 {
     FILE * In;
     FILE * Out;
@@ -446,19 +463,19 @@ static int WritePkt(const char * Path, const char * Tmp, const Trunc * Tr,
 
     errno = 0; /* fopen() may set it even on success */
 
-    for(i = 0; Ok && i < TrCount; i++)
+    for(i = 0; Ok && i < S->TrCount; i++)
     {
-        long Cut = Tr[i].len - (FieldSize[Tr[i].field] - 1);
+        const Trunc * t = &S->Tr[i];
 
-        Ok = CopyBytes(In, Out, Tr[i].at - pos) && CopyBytes(In, NULL, Cut);
-        pos = Tr[i].at + Cut;
+        Ok  = CopyBytes(In, Out, t->at - pos) && CopyBytes(In, NULL, t->cut);
+        pos = t->at + t->cut;
     }
 
     Ok = Ok && CopyBytes(In, Out, -1);
     fclose(In);
     Ok = (fflush(Out) == 0) && Ok;
     Ok = (fclose(Out) == 0) && Ok;
-    return Ok && stat(Tmp, &st) == 0 && (long)st.st_size == OutLen;
+    return Ok && stat(Tmp, &st) == 0 && (long)st.st_size == S->OutLen;
 }
 
 static unsigned Word(const unsigned char * p)
@@ -533,14 +550,14 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 {
     struct stat st;
     FILE * fh;
-    Trunc * Tr = NULL;
-    long Size, TrCount, Msgs, Tail, Rest, OutLen, Mod, i;
-    int B0, B1, Bad;
+    Scan S;
+    long Rest, i;
+    int Bad;
     struct utimbuf ut;
-    unsigned char Hdr[PKT_HDR_SIZE];
     char * Name = NULL;   /* Path with the addresses, once the header is read */
     int Rc = 1;
 
+    S.Tr  = NULL;
     errno = 0;
 
     if(stat(Path, &st) != 0)
@@ -560,8 +577,8 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 
     errno = 0; /* fopen() may set it even on success */
 
-    Msgs = ScanPacket(fh, Hdr, &Size, &Tail, &B0, &B1, &Tr, &TrCount);
-    Bad  = ferror(fh);
+    ScanPacket(fh, &S);
+    Bad = ferror(fh);
     fclose(fh);
 
     if(Bad)
@@ -571,71 +588,66 @@ static int ProcessPacket(const char * Path, const char * Tmp)
         goto done;
     }
 
-    if(Size < PKT_HDR_SIZE)
+    if(S.Size < PKT_HDR_SIZE)
     {
-        Log(LOG_ERR, "%s is not a packet: only %ld bytes, shorter than a packet "
-            "header, skipped", Path, Size);
+        Log(LOG_ERR, "%s is not a packet: only %ld bytes, shorter than a "
+            "packet header, skipped", Path, S.Size);
         goto done;
     }
 
-    Name = PktName(Path, Hdr);
-    Rest = Size - Tail;
+    Name = PktName(Path, S.Hdr);
+    Rest = S.Size - S.Tail;
 
-    if(Rest == 2 && B0 == 0 && B1 == 0)
+    if(Rest == 2 && S.B0 == 0 && S.B1 == 0)
     {
         /* a proper packet terminator */
     }
-    else if(Msgs == 0)
+    else if(S.Msgs == 0)
     {
         Log(LOG_ERR, "%s is not a packet: no packed messages after the packet "
             "header (%ld bytes of unknown data at offset %ld), skipped", Name,
-            Rest, Tail);
+            Rest, S.Tail);
         goto done;
     }
-    else if(B0 == 2 && B1 == 0)
+    else if(S.B0 == 2 && S.B1 == 0)
     {
         Log(LOG_WARN, "%s: message #%ld (offset %ld) is cut off by the end of "
-            "the file, its unterminated part is kept as is", Name, Msgs, Tail);
+            "the file, its unterminated part is kept as is", Name, S.Msgs,
+            S.Tail);
     }
     else if(Rest == 0)
     {
         Log(LOG_WARN, "%s: no packet terminator, the file ends right after "
-            "message #%ld", Name, Msgs);
+            "message #%ld", Name, S.Msgs);
     }
-    else if(Rest == 1 && B0 == 0)
+    else if(Rest == 1 && S.B0 == 0)
     {
         Log(LOG_WARN, "%s: incomplete packet terminator after message #%ld "
-            "(1 byte at offset %ld), kept as is", Name, Msgs, Tail);
+            "(1 byte at offset %ld), kept as is", Name, S.Msgs, S.Tail);
     }
-    else if(Rest > 2 && B0 == 0 && B1 == 0)
+    else if(Rest > 2 && S.B0 == 0 && S.B1 == 0)
     {
         Log(LOG_WARN, "%s: %ld bytes of unknown data after the packet "
-            "terminator (offset %ld), kept as is", Name, Rest - 2, Tail + 2);
+            "terminator (offset %ld), kept as is", Name, Rest - 2,
+            S.Tail + 2);
     }
     else
     {
         Log(LOG_WARN, "%s: unknown data instead of a packet terminator after "
             "message #%ld (%ld bytes at offset %ld), kept as is without "
-            "parsing", Name, Msgs, Rest, Tail);
+            "parsing", Name, S.Msgs, Rest, S.Tail);
     }
 
-    if(TrCount == 0)
+    if(S.TrCount == 0)
     {
-        Log(LOG_INFO, "processed %s: messages %ld, modified 0", Name, Msgs);
+        Log(LOG_INFO, "processed %s: messages %ld, modified 0", Name, S.Msgs);
         Rc = 0;
         goto done;
     }
 
-    OutLen = Size;
-
-    for(i = 0; i < TrCount; i++)
-    {
-        OutLen -= Tr[i].len - (FieldSize[Tr[i].field] - 1);
-    }
-
     errno = 0;
 
-    if(!WritePkt(Path, Tmp, Tr, TrCount, OutLen))
+    if(!WritePkt(Path, Tmp, &S))
     {
         Log(LOG_ERR, "can't write %s: %s, %s skipped", Tmp,
             errno ? strerror(errno) : "read or write error", Name);
@@ -672,25 +684,21 @@ static int ProcessPacket(const char * Path, const char * Tmp)
             strerror(errno));
     }
 
-    for(i = 0; i < TrCount; i++)
+    for(i = 0; i < S.TrCount; i++)
     {
+        const Trunc * t = &S.Tr[i];
+
         Log(LOG_WARN, "truncated %s to %ld bytes (was %ld) in message #%ld "
-            "in %s", FieldName[Tr[i].field], FieldSize[Tr[i].field] - 1,
-            Tr[i].len, Tr[i].msg, Name);
+            "in %s", FieldName[t->field], t->len - t->cut, t->len, t->msg,
+            Name);
     }
 
-    /* truncations are in message order */
-    for(i = 0, Mod = 0; i < TrCount; i++)
-    {
-        Mod += (i == 0 || Tr[i].msg != Tr[i - 1].msg);
-    }
-
-    Log(LOG_INFO, "processed %s: messages %ld, modified %ld", Name, Msgs,
-        Mod);
+    Log(LOG_INFO, "processed %s: messages %ld, modified %ld", Name, S.Msgs,
+        S.Mod);
     Rc = 0;
 
 done:
-    free(Tr);
+    free(S.Tr);
     free(Name);
     return Rc;
 }
