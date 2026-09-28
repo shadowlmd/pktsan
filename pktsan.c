@@ -565,8 +565,6 @@ static int ReplacePkt(const char * Path, const char * Tmp, const char * Name,
         return 0;
     }
 
-    errno = 0;
-
     if(remove(Path) != 0)
     {
         Log(LOG_ERR, "can't delete %s: %s, skipped", Name,
@@ -586,7 +584,6 @@ static int ReplacePkt(const char * Path, const char * Tmp, const char * Name,
 
     ut.actime  = st->st_atime;
     ut.modtime = st->st_mtime;
-    errno = 0;
 
     if(utime(Path, &ut) != 0)
     {
@@ -608,8 +605,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
     char * Name = NULL;   /* Path with the addresses, once the header is read */
     int Rc = 1;
 
-    S.Tr  = NULL;
-    errno = 0;
+    S.Tr = NULL;
 
     if(stat(Path, &st) != 0)
     {
@@ -617,7 +613,6 @@ static int ProcessPacket(const char * Path, const char * Tmp)
         goto done;
     }
 
-    errno = 0;
     fh = fopen(Path, "rb");
 
     if(fh == NULL)
@@ -763,7 +758,6 @@ static int ProcessDir(const char * Dir)
     struct dirent * de;
 
     Log(LOG_INFO, "processing directory %s", Dir);
-    errno = 0;
     d = opendir(Dir);
 
     if(d == NULL)
