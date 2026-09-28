@@ -101,15 +101,17 @@ Lines starting with `;` or `#` are comments. Keywords are case-insensitive.
   write error.
 
 File names are logged with the directory as given on the command line.
+A packet name is followed by the originating and destination addresses from
+the packet header, if the header could be read.
 
 ```
 2026-09-26 19:42:46 [info] processing directory c:\ftn\inbound
 2026-09-26 19:42:46 [info] processing directory c:\ftn\inbound\temp
-2026-09-26 19:42:46 [warn] truncated subject to 71 bytes (was 200) in message #32 in c:\ftn\inbound\temp\1234abcd.pkt
-2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\1234abcd.pkt: messages 40, modified 1
-2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\5678ef01.pkt: messages 12, modified 0
-2026-09-26 19:42:46 [warn] c:\ftn\inbound\temp\6ab6fb20.pkt: incomplete packet terminator after message #1 (1 byte at offset 662), kept as is
-2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\6ab6fb20.pkt: messages 1, modified 0
+2026-09-26 19:42:46 [warn] truncated subject to 71 bytes (was 200) in message #32 in c:\ftn\inbound\temp\1234abcd.pkt (2:5001/100 -> 2:5030/1997)
+2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\1234abcd.pkt (2:5001/100 -> 2:5030/1997): messages 40, modified 1
+2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\5678ef01.pkt (2:5030/1997.1 -> 2:5030/1997): messages 12, modified 0
+2026-09-26 19:42:46 [warn] c:\ftn\inbound\temp\6ab6fb20.pkt (2:50/4 -> 2:5030/1997): incomplete packet terminator after message #1 (1 byte at offset 662), kept as is
+2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\6ab6fb20.pkt (2:50/4 -> 2:5030/1997): messages 1, modified 0
 2026-09-26 19:42:46 [err] c:\ftn\inbound\temp\9abc0123.pkt is not a packet: only 12 bytes, shorter than a packet header, skipped
 ```
 

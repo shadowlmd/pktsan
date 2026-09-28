@@ -281,11 +281,13 @@ static int ReadConfig(const char * Path, int Required, char ** LogFile)
  * A message cut off by the end of the file is counted too, and its complete
  * strings are truncated. *Size is the file size, *Tail the offset of the
  * data after the last complete message (the start of the cut off message,
- * if any), *B0 and *B1 the first two bytes there (EOF if none).
- * Returns the number of messages.
+ * if any), *B0 and *B1 the first two bytes there (EOF if none). The packet
+ * header is stored to Hdr (PKT_HDR_SIZE bytes). Returns the number of
+ * messages.
  */
-static long ScanPacket(FILE * fh, long * Size, long * Tail, int * B0, int * B1,
-                       Trunc ** Tr, long * TrCount)
+static long ScanPacket(FILE * fh, unsigned char * Hdr, long * Size,
+                       long * Tail, int * B0, int * B1, Trunc ** Tr,
+                       long * TrCount)
 {
     long pos = 0, Msgs = 0, TrAlloc = 0;
     int c;
@@ -296,9 +298,9 @@ static long ScanPacket(FILE * fh, long * Size, long * Tail, int * B0, int * B1,
     *B0      = EOF;
     *B1      = EOF;
 
-    while(pos < PKT_HDR_SIZE && getc(fh) != EOF)
+    while(pos < PKT_HDR_SIZE && (c = getc(fh)) != EOF)
     {
-        pos++;
+        Hdr[pos++] = (unsigned char)c;
     }
 
     /* packed messages, if the header is complete; left by break */
@@ -459,6 +461,73 @@ static int WritePkt(const char * Path, const char * Tmp, const Trunc * Tr,
     return Ok && stat(Tmp, &st) == 0 && (long)st.st_size == OutLen;
 }
 
+static unsigned Word(const unsigned char * p)
+{
+    return p[0] | ((unsigned)p[1] << 8);
+}
+
+/* zone:net/node.point, without "zone:" if 0 and without ".point" if 0 */
+static char * FormatAddr(char * p, unsigned Zone, unsigned Net, unsigned Node,
+                         unsigned Point)
+{
+    if(Zone != 0)
+    {
+        p += sprintf(p, "%u:", Zone);
+    }
+
+    p += sprintf(p, "%u/%u", Net, Node);
+
+    if(Point != 0)
+    {
+        p += sprintf(p, ".%u", Point);
+    }
+
+    return p;
+}
+
+/*
+ * Path + " (orig -> dest)" from packet header Hdr: type 2+ (FSC-0039,
+ * FSC-0048), type 2.2 (FSC-0045) or type 2 (FTS-0001, zones from QMail).
+ */
+static char * PktName(const char * Path, const unsigned char * Hdr)
+{
+    unsigned OZone = Word(Hdr + 34), DZone = Word(Hdr + 36);
+    unsigned ONet  = Word(Hdr + 20), DNet  = Word(Hdr + 22);
+    unsigned OPt   = 0,              DPt   = 0;
+    unsigned Cw    = Word(Hdr + 44), CwCopy = Word(Hdr + 40);
+    char * s = (char *)Alloc(strlen(Path) + 64);
+    char * p;
+
+    if((Cw & 1) != 0 && Cw == (((CwCopy & 0xFF) << 8) | (CwCopy >> 8)))
+    {
+        if(Word(Hdr + 46) != 0)
+        {
+            OZone = Word(Hdr + 46);
+            DZone = Word(Hdr + 48);
+        }
+
+        OPt = Word(Hdr + 50);
+        DPt = Word(Hdr + 52);
+
+        if(OPt != 0 && ONet == 0xFFFF)
+        {
+            ONet = Word(Hdr + 38); /* FSC-0048 AuxNet */
+        }
+    }
+    else if(Word(Hdr + 16) == 2)
+    {
+        OPt = Word(Hdr + 4);
+        DPt = Word(Hdr + 6);
+    }
+
+    p  = s + sprintf(s, "%s (", Path);
+    p  = FormatAddr(p, OZone, ONet, Word(Hdr + 0), OPt);
+    p += sprintf(p, " -> ");
+    p  = FormatAddr(p, DZone, DNet, Word(Hdr + 2), DPt);
+    strcpy(p, ")");
+    return s;
+}
+
 /* Path and Tmp include the directory. Returns 0 on success, 1 on error. */
 static int ProcessPacket(const char * Path, const char * Tmp)
 {
@@ -468,6 +537,8 @@ static int ProcessPacket(const char * Path, const char * Tmp)
     long Size, TrCount, Msgs, Tail, Rest, OutLen, Mod, i;
     int B0, B1, Bad;
     struct utimbuf ut;
+    unsigned char Hdr[PKT_HDR_SIZE];
+    char * Name = NULL;   /* Path with the addresses, once the header is read */
     int Rc = 1;
 
     errno = 0;
@@ -489,7 +560,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 
     errno = 0; /* fopen() may set it even on success */
 
-    Msgs = ScanPacket(fh, &Size, &Tail, &B0, &B1, &Tr, &TrCount);
+    Msgs = ScanPacket(fh, Hdr, &Size, &Tail, &B0, &B1, &Tr, &TrCount);
     Bad  = ferror(fh);
     fclose(fh);
 
@@ -507,6 +578,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
         goto done;
     }
 
+    Name = PktName(Path, Hdr);
     Rest = Size - Tail;
 
     if(Rest == 2 && B0 == 0 && B1 == 0)
@@ -516,40 +588,40 @@ static int ProcessPacket(const char * Path, const char * Tmp)
     else if(Msgs == 0)
     {
         Log(LOG_ERR, "%s is not a packet: no packed messages after the packet "
-            "header (%ld bytes of unknown data at offset %ld), skipped", Path,
+            "header (%ld bytes of unknown data at offset %ld), skipped", Name,
             Rest, Tail);
         goto done;
     }
     else if(B0 == 2 && B1 == 0)
     {
         Log(LOG_WARN, "%s: message #%ld (offset %ld) is cut off by the end of "
-            "the file, its unterminated part is kept as is", Path, Msgs, Tail);
+            "the file, its unterminated part is kept as is", Name, Msgs, Tail);
     }
     else if(Rest == 0)
     {
         Log(LOG_WARN, "%s: no packet terminator, the file ends right after "
-            "message #%ld", Path, Msgs);
+            "message #%ld", Name, Msgs);
     }
     else if(Rest == 1 && B0 == 0)
     {
         Log(LOG_WARN, "%s: incomplete packet terminator after message #%ld "
-            "(1 byte at offset %ld), kept as is", Path, Msgs, Tail);
+            "(1 byte at offset %ld), kept as is", Name, Msgs, Tail);
     }
     else if(Rest > 2 && B0 == 0 && B1 == 0)
     {
         Log(LOG_WARN, "%s: %ld bytes of unknown data after the packet "
-            "terminator (offset %ld), kept as is", Path, Rest - 2, Tail + 2);
+            "terminator (offset %ld), kept as is", Name, Rest - 2, Tail + 2);
     }
     else
     {
         Log(LOG_WARN, "%s: unknown data instead of a packet terminator after "
             "message #%ld (%ld bytes at offset %ld), kept as is without "
-            "parsing", Path, Msgs, Rest, Tail);
+            "parsing", Name, Msgs, Rest, Tail);
     }
 
     if(TrCount == 0)
     {
-        Log(LOG_INFO, "processed %s: messages %ld, modified 0", Path, Msgs);
+        Log(LOG_INFO, "processed %s: messages %ld, modified 0", Name, Msgs);
         Rc = 0;
         goto done;
     }
@@ -566,7 +638,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
     if(!WritePkt(Path, Tmp, Tr, TrCount, OutLen))
     {
         Log(LOG_ERR, "can't write %s: %s, %s skipped", Tmp,
-            errno ? strerror(errno) : "read or write error", Path);
+            errno ? strerror(errno) : "read or write error", Name);
         remove(Tmp);
         goto done;
     }
@@ -575,7 +647,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 
     if(remove(Path) != 0)
     {
-        Log(LOG_ERR, "can't delete %s: %s, skipped", Path,
+        Log(LOG_ERR, "can't delete %s: %s, skipped", Name,
             strerror(errno));
         remove(Tmp);
         goto done;
@@ -585,7 +657,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
     {
         /* Tmp is complete: it is renamed back on the next run */
         Log(LOG_ERR, "can't rename %s to %s: %s, the processed packet is "
-            "restored from %s on the next run", Tmp, Path, strerror(errno),
+            "restored from %s on the next run", Tmp, Name, strerror(errno),
             Tmp);
         goto done;
     }
@@ -596,7 +668,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 
     if(utime(Path, &ut) != 0)
     {
-        Log(LOG_WARN, "can't restore the file time of %s: %s", Path,
+        Log(LOG_WARN, "can't restore the file time of %s: %s", Name,
             strerror(errno));
     }
 
@@ -604,7 +676,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
     {
         Log(LOG_WARN, "truncated %s to %ld bytes (was %ld) in message #%ld "
             "in %s", FieldName[Tr[i].field], FieldSize[Tr[i].field] - 1,
-            Tr[i].len, Tr[i].msg, Path);
+            Tr[i].len, Tr[i].msg, Name);
     }
 
     /* truncations are in message order */
@@ -613,12 +685,13 @@ static int ProcessPacket(const char * Path, const char * Tmp)
         Mod += (i == 0 || Tr[i].msg != Tr[i - 1].msg);
     }
 
-    Log(LOG_INFO, "processed %s: messages %ld, modified %ld", Path, Msgs,
+    Log(LOG_INFO, "processed %s: messages %ld, modified %ld", Name, Msgs,
         Mod);
     Rc = 0;
 
 done:
     free(Tr);
+    free(Name);
     return Rc;
 }
 

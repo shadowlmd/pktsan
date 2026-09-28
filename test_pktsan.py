@@ -36,6 +36,26 @@ def packet(msgs, tail=b"\0\0", seed=0):
     return pkt_header(seed) + b"".join(msgs) + tail
 
 
+def pkt_addr(h):
+    """Independent model: "orig -> dest" from a packet header."""
+    def w(o):
+        return h[o] | h[o + 1] << 8
+    oz, dz, onet, dnet, op, dp = w(34), w(36), w(20), w(22), 0, 0
+    cw, cwc = w(44), w(40)
+    if cw & 1 and cw == ((cwc & 0xff) << 8 | cwc >> 8):
+        if w(46):
+            oz, dz = w(46), w(48)
+        op, dp = w(50), w(52)
+        if op and onet == 0xffff:
+            onet = w(38)
+    elif w(16) == 2:
+        op, dp = w(4), w(6)
+
+    def fmt(z, n, f, p):
+        return ("%d:" % z if z else "") + "%d/%d" % (n, f) + (".%d" % p if p else "")
+    return "%s -> %s" % (fmt(oz, onet, w(0), op), fmt(dz, dnet, w(2), dp))
+
+
 def reference(data):
     """Independent model: returns (output, msgs, [(msg, field, len)], tail).
 
@@ -153,6 +173,7 @@ class Env:
             for f in re.findall(r"[^\s(]+\.(?:pkt|tr\$)", text, re.I):
                 assert f.startswith(self.root + "/"), "no full path: %r" % line
             text = text.replace(prefix, "")
+            text = re.sub(r"(\.pkt) \([^()]* -> [^()]*\)", r"\1", text, flags=re.I)
             isdir = text.startswith("processing directory ")
             assert (m.group(1) == "info") == (isdir or text.startswith("processed ")), line
             if isdir and not dirs:
@@ -208,6 +229,14 @@ def check_packet(env, name, data, r=None):
         assert info == ["processed %s: messages %d, modified %d" % (
             name, n, len(set(m for m, _, _ in tr)))], info
     assert not [f for f in env.files() if f.lower().endswith("$")], env.files()
+    # the addresses follow the packet name wherever the header was read
+    full = os.path.join(env.dir, name)
+    for line in env.logtext().splitlines():
+        if full in line:
+            if len(data) >= 58:
+                assert "%s (%s)" % (full, pkt_addr(data)) in line, line
+            else:
+                assert full + " (" not in line, line
     return n, tr
 
 
@@ -315,6 +344,47 @@ def streaming_memory():
     assert [l[1] for l in env.loglines("info")] == [
         "processed big.pkt: messages 2, modified 2"]
     env.cleanup()
+
+
+def header(onode=100, dnode=200, onet=5001, dnet=5030, oz=0, dz=0,
+           qoz=0, qdz=0, op=0, dp=0, aux=0, cw=False, sub=0, p22=(0, 0)):
+    """A packet header: type 2+ with cw, type 2.2 with sub=2, else type 2."""
+    h = bytearray(58)
+    struct.pack_into("<HH", h, 0, onode, dnode)
+    struct.pack_into("<HH", h, 4, *p22)
+    struct.pack_into("<HH", h, 16, sub, 2)
+    struct.pack_into("<HH", h, 20, onet, dnet)
+    struct.pack_into("<HH", h, 34, qoz, qdz)
+    if cw:
+        struct.pack_into("<HH", h, 38, aux, 0x0100)   # AuxNet, CW copy
+        struct.pack_into("<H", h, 44, 0x0001)         # CW: type 2+
+        struct.pack_into("<HHHH", h, 46, oz, dz, op, dp)
+    return bytes(h)
+
+
+@test
+def addresses():
+    cases = [
+        # type 2, zones from QMail fields, no zones
+        (header(qoz=2, qdz=2), "2:5001/100 -> 2:5030/200"),
+        (header(), "5001/100 -> 5030/200"),
+        # type 2+: points, point with net 0xFFFF and AuxNet, point 0
+        (header(cw=True, oz=2, dz=2, op=1), "2:5001/100.1 -> 2:5030/200"),
+        (header(cw=True, oz=2, dz=2, onet=0xffff, aux=50, op=4, dp=7),
+         "2:50/100.4 -> 2:5030/200.7"),
+        (header(cw=True, oz=2, dz=1, qoz=3, qdz=3), "2:5001/100 -> 1:5030/200"),
+        (header(cw=True, qoz=2, qdz=2, dp=3), "2:5001/100 -> 2:5030/200.3"),
+        # type 2.2
+        (header(sub=2, qoz=2, qdz=2, p22=(5, 0)), "2:5001/100.5 -> 2:5030/200"),
+    ]
+    for h, addr in cases:
+        assert pkt_addr(h) == addr, (pkt_addr(h), addr)
+        env = Env()
+        data = h + pmsg(subj=b"S" * 80) + b"\0\0"
+        check_packet(env, "a.pkt", data)
+        assert ("processed %s/a.pkt (%s): messages 1, modified 1" % (env.dir, addr)
+                in env.logtext()), env.logtext()
+        env.cleanup()
 
 
 @test
@@ -492,7 +562,7 @@ def relative_directory():
         assert env.run(dirs=[d], cwd=cwd).returncode == 0
         text = env.logtext()
         assert "processing directory %s\n" % d in text, (d, text)
-        assert "processed %s: " % os.path.join(d, "1.pkt") in text, (d, text)
+        assert "processed %s (" % os.path.join(d, "1.pkt") in text, (d, text)
     assert env.get("1.pkt") == reference(packet([pmsg(to=b"x" * 40)]))[0]
     env.cleanup()
 
@@ -580,11 +650,12 @@ def default_config_next_to_program():
     # in the current directory
     r = subprocess.run(["pktsan", "."], cwd=env.dir, capture_output=True,
                        env=dict(os.environ, PATH=bindir))
-    assert r.returncode == 0 and b"/1.pkt: messages 1" in r.stdout, r
+    assert r.returncode == 0 and b"processed ./1.pkt (" in r.stdout, r
     # no config at all: defaults, log to stdout
     os.remove(os.path.join(bindir, "pktsan.cfg"))
     r = subprocess.run([exe, "."], cwd=env.dir, capture_output=True)
-    assert r.returncode == 0 and b"[info] processed ./1.pkt: messages 1, modified 0" in r.stdout, r
+    assert r.returncode == 0 and re.search(
+        rb"\[info\] processed \./1\.pkt \([^)]*\): messages 1, modified 0", r.stdout), r
     env.cleanup()
 
 
