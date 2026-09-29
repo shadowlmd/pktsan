@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Cache Open Watcom 2.0
+        id: cache-watcom
+        uses: actions/cache@v4
+        with:
+          path: C:\watcom
+          key: open-watcom-2.0-c-win-x86-v1
+
+      - name: Download Open Watcom 2.0
+        if: steps.cache-watcom.outputs.cache-hit != 'true'
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/open-watcom/open-watcom-v2/releases/download/Current-build/open-watcom-2_0-c-win-x86.exe" -OutFile "ow-installer.exe"
+
+      - name: Install Open Watcom 2.0
+        if: steps.cache-watcom.outputs.cache-hit != 'true'
+        run: |
+          mkdir C:\watcom
+          & 7z x ow-installer.exe -oC:\watcom -y
+
+      - name: Build
+        shell: cmd
+        run: |
+          set WATCOM=C:\watcom
+          set PATH=%WATCOM%\binnt;%WATCOM%\binw;%PATH%
+          set INCLUDE=%WATCOM%\h
+
+          wcl pktsan.c
+          if errorlevel 1 exit /b 1
+          move pktsan.exe pktsan-dos.exe
+
+          wcl386 -bt=nt pktsan.c
+          if errorlevel 1 exit /b 1
+          move pktsan.exe pktsan-w32.exe
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path staging
+          Copy-Item pktsan-dos.exe staging/
+          Copy-Item pktsan-w32.exe staging/
+          Copy-Item pktsan.cfg staging/
+          Copy-Item README.md staging/
+
+          Compress-Archive -Path staging\* -DestinationPath pktsan.zip -Force
+
+      - name: Update Tag
+        shell: pwsh
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f release
+          git push origin release --force
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: release
+          name: Release
+          files: pktsan.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
