@@ -49,12 +49,17 @@ jobs:
           if errorlevel 1 exit /b 1
           move pktsan.exe pktsan-w32.exe
 
+          wcl386 -bt=os2v2 -l=os2v2 pktsan.c
+          if errorlevel 1 exit /b 1
+          move pktsan.exe pktsan-os2.exe
+
       - name: Package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path staging
           Copy-Item pktsan-dos.exe staging/
           Copy-Item pktsan-w32.exe staging/
+          Copy-Item pktsan-os2.exe staging/
           Copy-Item pktsan.cfg staging/
           Copy-Item README.md staging/
 
