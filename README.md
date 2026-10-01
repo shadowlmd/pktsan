@@ -20,15 +20,17 @@ pktsan runs before the tosser and truncates the strings.
   last message) is kept byte for byte.
 - Skips a file that is not a packet: shorter than a packet header (58
   bytes), or followed by neither packed messages nor a packet terminator.
+- DOS version: may skip a packet with more than 8000 strings to truncate.
 
 A packet that needs no changes is not written to. A packet that needs
-changes is written to `name.tr$`, then `name.pkt` is deleted, `name.tr$` is
-renamed to `name.pkt` and the original file time is restored.
+changes is written to `name.pk$` (`NAME.PK#` for `NAME.PKT`), then
+`name.pkt` is deleted, `name.pk$` is renamed to `name.pkt` and the original
+file time is restored.
 
 After an interrupted run, the next run:
 
-- deletes `name.tr$` if `name.pkt` exists, and processes `name.pkt` again;
-- renames `name.tr$` to `name.pkt` if `name.pkt` does not exist.
+- deletes `name.pk$` if `name.pkt` exists, and processes `name.pkt` again;
+- renames `name.pk$` to `name.pkt` if `name.pkt` does not exist.
 
 ## FastEcho
 
@@ -94,21 +96,28 @@ Lines starting with `;` or `#` are comments. Keywords are case-insensitive.
 ## Log
 
 - `[info]`: each directory and the result for each packet.
-- `[warn]`: a problem in a processed packet: truncated field, cut off
-  message, unparsable data after the last message; also leftover temporary
-  files.
-- `[err]`: a directory or a file was skipped: not a packet, or a read or
-  write error.
+- `[warn]`: a packet being modified and each of its modified messages; a
+  problem in a processed packet: cut off message, unparsable data after the
+  last message; leftover temporary files.
+- `[err]`: a directory or a file was skipped: not a packet, a read or
+  write error, or not enough memory.
 
 File names are logged with the directory as given on the command line.
 A packet name is followed by the originating and destination addresses from
 the packet header, if the header could be read.
 
+A `modifying` line is followed by one line per modified message: its
+number in the packet, the area (`NETMAIL` for netmail), the sender, the
+recipient and the subject as written to the packet, and the truncated
+fields with their lengths in bytes before and after.
+
 ```
 2026-09-26 19:42:46 [info] processing directory c:\ftn\inbound
 2026-09-26 19:42:46 [info] processing directory c:\ftn\inbound\temp
-2026-09-26 19:42:46 [warn] truncated subject to 71 bytes (was 200) in message #32 in c:\ftn\inbound\temp\1234abcd.pkt (2:5001/100 -> 2:5030/1997)
-2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\1234abcd.pkt (2:5001/100 -> 2:5030/1997): messages 40, modified 1
+2026-09-26 19:42:46 [warn] modifying c:\ftn\inbound\temp\1234abcd.pkt (2:5001/100 -> 2:5030/1997)
+2026-09-26 19:42:46 [warn] 1234abcd.pkt #32: area GENERAL.TEST, from Ivan Petrov (5001/100) to All, subject "Re: Configuring FastEcho to toss packets from the unpack directory befo": truncating subject 91 -> 71
+2026-09-26 19:42:46 [warn] 1234abcd.pkt #35: area NETMAIL, from Sysop (5001/100) to Jean-Claude Camille Francois Van Va (5030/1997), subject "Fan mail": truncating toUserName 42 -> 35
+2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\1234abcd.pkt (2:5001/100 -> 2:5030/1997): messages 40, modified 2
 2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\5678ef01.pkt (2:5030/1997.1 -> 2:5030/1997): messages 12, modified 0
 2026-09-26 19:42:46 [warn] c:\ftn\inbound\temp\6ab6fb20.pkt (2:50/4 -> 2:5030/1997): incomplete packet terminator after message #1 (1 byte at offset 662), kept as is
 2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\6ab6fb20.pkt (2:50/4 -> 2:5030/1997): messages 1, modified 0

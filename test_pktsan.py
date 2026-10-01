@@ -56,40 +56,62 @@ def pkt_addr(h):
     return "%s -> %s" % (fmt(oz, onet, w(0), op), fmt(dz, dnet, w(2), dp))
 
 
+def clean(b):
+    return "".join("?" if c < 32 or c == 127 else chr(c) for c in b)
+
+
+def msg_info(mh, to, frm, subj, text):
+    """Independent model: the message in a modified message log line."""
+    onode, dnode, onet, dnet = struct.unpack("<HHHH", mh[2:10])
+    line = text[:255].split(b"\r")[0]
+    echo = line.startswith(b"AREA:")
+    return 'area %s, from %s (%d/%d) to %s%s, subject "%s"' % (
+        (clean(line[5:]) or "<empty>") if echo else "NETMAIL", clean(frm[:35]), onet, onode,
+        clean(to[:35]), "" if echo else " (%d/%d)" % (dnet, dnode), clean(subj[:71]))
+
+
 def reference(data):
-    """Independent model: returns (output, msgs, [(msg, field, len)], tail).
+    """Independent model: returns (output, msgs, [(msg, field, len)], tail,
+    {msg: info}).
 
     msgs counts a message cut off by the end of the file too; tail is the
-    offset of the data after the last complete message."""
+    offset of the data after the last complete message; info is the
+    message in the modified message log lines."""
     if len(data) < 58:
-        return data, 0, [], len(data)
+        return data, 0, [], len(data), {}
     out = bytearray(data[:58])
-    p, n, tr = 58, 0, []
+    p, n, tr, info = 58, 0, [], {}
     while data[p:p + 2] == b"\x02\x00":
         n += 1
         if len(data) - p < 34:
             break
         q = p + 34
         out += data[p:q]
+        fields = [b""] * 4
         for i in range(4):
             z = data.find(b"\0", q)
+            f = data[q:z] if z >= 0 else data[q:]
+            fields[i] = f
             if z < 0:
-                out += data[q:]
-                return bytes(out), n, tr, p
-            f = data[q:z]
+                out += f
+                break
             if i < 3 and len(f) > LIMITS[i] - 1:
                 tr.append((n, i, len(f)))
                 f = f[:LIMITS[i] - 1]
             out += f + b"\0"
             q = z + 1
+        if tr and tr[-1][0] == n:
+            info[n] = msg_info(data[p:p + 34], *fields)
+        if z < 0:
+            return bytes(out), n, tr, p, info
         p = q
     out += data[p:]
-    return bytes(out), n, tr, p
+    return bytes(out), n, tr, p, info
 
 
 def expected_problem(data):
     """None for a proper packet, else ("err" | "warn", start of message)."""
-    _, n, _, tail = reference(data)
+    _, n, _, tail, _ = reference(data)
     rest = data[tail:]
     if len(data) < 58:
         return ("err", "%s is not a packet: only %d bytes" % ("{0}", len(data)))
@@ -156,8 +178,11 @@ class Env:
     def logtext(self):
         if not os.path.exists(self.log):
             return ""
-        with open(self.log) as f:
+        with open(self.log, encoding="latin-1", newline="") as f:
             return f.read()
+
+    def logsplit(self):
+        return self.logtext().split("\n")[:-1]
 
     def loglines(self, level=None, dirs=False):
         """Log lines as (level, text); "processing directory" lines only if dirs.
@@ -166,11 +191,14 @@ class Env:
         which is then removed from the text."""
         prefix = self.dir + "/"
         res = []
-        for line in self.logtext().splitlines():
+        for line in self.logsplit():
             m = re.match(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d \[(\w+)\] (.*)$", line)
             assert m, "bad log line: %r" % line
             text = m.group(2)
-            for f in re.findall(r"[^\s(]+\.(?:pkt|tr\$)", text, re.I):
+            # a modified message line starts with the packet name only
+            ismsg = re.match(r"[^\s/]*\.pkt #\d+: area ", text, re.I)
+            for f in re.findall(r"[^\s(]+\.(?:pkt|pk\$|pk#)", text[ismsg.end() if ismsg else 0:],
+                                re.I):
                 assert f.startswith(self.root + "/"), "no full path: %r" % line
             text = text.replace(prefix, "")
             text = re.sub(r"(\.pkt) \([^()]* -> [^()]*\)", r"\1", text, flags=re.I)
@@ -191,9 +219,17 @@ class Env:
         shutil.rmtree(self.root)
 
 
-def warn_lines(tr, name):
-    return ["truncated %s to %d bytes (was %d) in message #%d in %s" %
-            (NAMES[f], LIMITS[f] - 1, ln, m, name) for m, f, ln in tr]
+def is_msg_line(text):
+    return re.match(r"[^\s/]*\.pkt #\d+: area ", text, re.I) is not None
+
+
+def msg_lines(tr, info, name):
+    """Independent model: the modified message log lines."""
+    fields = {}
+    for m, f, ln in tr:
+        fields.setdefault(m, []).append("%s %d -> %d" % (NAMES[f], ln, LIMITS[f] - 1))
+    return ["%s #%d: %s: truncating %s" % (os.path.basename(name), m, info[m], ", ".join(fs))
+            for m, fs in fields.items()]
 
 
 def check_packet(env, name, data, r=None):
@@ -205,7 +241,7 @@ def check_packet(env, name, data, r=None):
     prob = expected_problem(data)
     skipped = prob is not None and prob[0] == "err"
     assert r.returncode == (1 if skipped else 0), r
-    exp, n, tr, _ = reference(data)
+    exp, n, tr, _, info = reference(data)
     got = env.get(name)
     if skipped:
         assert got == data and tr == []
@@ -215,23 +251,31 @@ def check_packet(env, name, data, r=None):
     if not tr:
         assert st.st_ino == ino, "unchanged packet was rewritten"
     lines = env.loglines()
-    assert [l[1] for l in lines if l[1].startswith("truncated ")] == warn_lines(tr, name)
-    other = [l for l in lines if l[0] != "info" and not l[1].startswith("truncated ")]
+    mod = len(set(m for m, _, _ in tr))
+    texts = [l[1] for l in lines]
+    # the packet, then its modified messages, all together
+    block = (["modifying %s" % name] + msg_lines(tr, info, name)) if tr else []
+    mods = [l for l in lines if is_msg_line(l[1]) or l[1].startswith("modifying ")]
+    assert mods == [("warn", t) for t in block], (mods, block)
+    if block:
+        i = texts.index(block[0])
+        assert texts[i:i + len(block)] == block, texts
+    processed = [l for l in lines if l[1].startswith("processed ")]
+    other = [l for l in lines if l not in processed and l not in mods]
     if prob is None:
         assert other == [], other
     else:
         assert len(other) == 1 and other[0][0] == prob[0] and \
             other[0][1].startswith(prob[1].format(name)), (other, prob)
-    info = [l[1] for l in lines if l[0] == "info"]
     if skipped:
-        assert info == []
+        assert processed == []
     elif "LogLevel info" in open(env.cfg).read():
-        assert info == ["processed %s: messages %d, modified %d" % (
-            name, n, len(set(m for m, _, _ in tr)))], info
-    assert not [f for f in env.files() if f.lower().endswith("$")], env.files()
+        assert processed == [("info", "processed %s: messages %d, modified %d" % (
+            name, n, mod))], processed
+    assert not [f for f in env.files() if f.lower().endswith((".pk$", ".pk#"))], env.files()
     # the addresses follow the packet name wherever the header was read
     full = os.path.join(env.dir, name)
-    for line in env.logtext().splitlines():
+    for line in env.logsplit():
         if full in line:
             if len(data) >= 58:
                 assert "%s (%s)" % (full, pkt_addr(data)) in line, line
@@ -281,10 +325,51 @@ def all_fields_long_log_format():
                                 text=b"\x01MSGID: 1:2/3 1\rbody\r")])
     n, tr = check_packet(env, "ab.pkt", data)
     assert tr == [(2, 0, 40), (2, 1, 36), (2, 2, 200)]
-    assert env.loglines("warn")[2][1] == \
-        "truncated subject to 71 bytes (was 200) in message #2 in ab.pkt"
-    assert env.loglines("info")[-1][1] == "processed ab.pkt: messages 2, modified 1"
+    assert env.loglines() == [
+        ("warn", "modifying ab.pkt"),
+        ("warn", "ab.pkt #2: area NETMAIL, from %s (5020/1) to %s (5030/2), subject \"%s\": "
+         "truncating toUserName 40 -> 35, fromUserName 36 -> 35, subject 200 -> 71"
+         % ("F" * 35, "T" * 35, "S" * 71)),
+        ("info", "processed ab.pkt: messages 2, modified 1")]
     env.cleanup()
+
+
+@test
+def message_info():
+    S = b"S" * 80
+    cases = [
+        (b"AREA:RU.TEST\rtext\r", "RU.TEST"),
+        (b"\x01AREA:RU.TEST\r", "NETMAIL"),
+        (b"AREA:RU.TEST\nx\r", "RU.TEST?x"),
+        (b"AREA:R50", "R50"),
+        (b"AREA:\rtext\r", "<empty>"),
+        (b"AREA:", "<empty>"),
+        (b"AREA:A\x01B\x7f\r", "A?B?"),
+        (b"AREA:" + b"x" * 300, "x" * 250),
+        (b"\x01MSGID: 2:5020/1 1\rAREA:R50\r", "NETMAIL"),
+        (b"text\r", "NETMAIL"),
+        (b"", "NETMAIL"),
+    ]
+    for text, area in cases:
+        env = Env()
+        data = packet([pmsg(subj=S, text=text)])
+        to = "All" if area != "NETMAIL" else "All (5030/2)"
+        info = 'area %s, from Sysop (5020/1) to %s, subject "%s"' % (area, to, "S" * 71)
+        assert reference(data)[4] == {1: info}, (text, reference(data)[4], info)
+        check_packet(env, "m.pkt", data)
+        assert env.loglines("warn")[1:] == [
+            ("warn", "m.pkt #1: %s: truncating subject 80 -> 71" % info)], env.logtext()
+        env.cleanup()
+    # strings as written, addresses from the message header
+    for subj, shown in ((b"", ""), (b"x" * 71, "x" * 71), (b"a\rb", "a?b")):
+        env = Env()
+        hdr = struct.pack("<HHHHHHH", 2, 11, 22, 33, 44, 0, 0)
+        check_packet(env, "m.pkt", packet([pmsg(to=b"T" * 50, frm=b"A\tB\xa0\x85",
+                                                subj=subj, hdr=hdr)]))
+        assert env.loglines("warn")[1:] == [
+            ("warn", 'm.pkt #1: area NETMAIL, from A?B\xa0\x85 (33/11) to %s (44/22), '
+             'subject "%s": truncating toUserName 50 -> 35' % ("T" * 35, shown))], env.logtext()
+        env.cleanup()
 
 
 @test
@@ -439,7 +524,7 @@ def short_files():
         elif size < 60:
             assert env.loglines()[0][0] == "err", size
         else:
-            assert env.loglines()[0] == ("warn", "s.pkt: message #1 (offset 58) is cut "
+            assert env.loglines()[2 if tr else 0] == ("warn", "s.pkt: message #1 (offset 58) is cut "
                                          "off by the end of the file, its unterminated "
                                          "part is kept as is"), size
         env.cleanup()
@@ -473,7 +558,7 @@ def file_name_matching():
         should = nm.lower().endswith(".pkt")
         assert (env.get(nm) == exp) == should, nm
     assert os.path.isdir(os.path.join(env.dir, "dir.pkt"))
-    assert len(env.loglines("warn")) == 5
+    assert len([l for l in env.loglines("warn") if is_msg_line(l[1])]) == 5
     env.cleanup()
 
 
@@ -486,8 +571,10 @@ def log_level_warn():
     assert env.run().returncode == 0
     # packets are processed in directory order
     assert sorted(env.loglines()) == [
+        ("warn", "2.pkt #1: area NETMAIL, from Sysop (5020/1) to %s (5030/2), subject \"Hello\": "
+         "truncating toUserName 36 -> 35" % ("x" * 35)),
         ("warn", "3.pkt: incomplete packet terminator after message #1 (1 byte at offset %d), kept as is" % (58 + len(pmsg()))),
-        ("warn", "truncated toUserName to 35 bytes (was 36) in message #1 in 2.pkt")]
+        ("warn", "modifying 2.pkt")]
     env.cleanup()
 
 
@@ -497,9 +584,9 @@ def log_level_info_lists_all_packets():
     for i in range(5):
         env.put("%d.pkt" % i, packet([pmsg(subj=b"s" * (70 + i))]))
     assert env.run().returncode == 0
-    infos = [l[1] for l in env.loglines("info")]
-    assert len([i for i in infos if i.startswith("processed ")]) == 5
-    assert len(env.loglines("warn")) == 3
+    lines = env.loglines()
+    assert len([l for l in lines if l[1].startswith("processed ")]) == 5
+    assert len([l for l in lines if is_msg_line(l[1])]) == 3
     env.cleanup()
 
 
@@ -538,7 +625,7 @@ def several_directories():
     # a missing directory is an error, the others are processed
     r = env.run(dirs=[env.dir, missing, other])
     assert r.returncode == 1, r
-    lines = [l for l in env.loglines(dirs=True) if not l[1].startswith("truncated ")]
+    lines = [l for l in env.loglines(dirs=True) if l[0] != "warn"]
     assert lines == [
         ("info", "processing directory %s" % env.dir),
         ("info", "processed 1.pkt: messages 1, modified 1"),
@@ -608,7 +695,7 @@ def config_handling():
     assert r.returncode == 0, r
     with open(log) as f:
         text = f.read()
-    assert "[warn] truncated toUserName" in text and "[info]" not in text
+    assert "[warn] 1.pkt #1: area NETMAIL, " in text and "[info]" not in text
     env.cleanup()
 
 
@@ -686,17 +773,24 @@ def temp_files_from_interrupted_run():
     env = Env()
     data = packet([pmsg(to=b"x" * 40)])
     env.put("1.pkt", data)
-    env.put("1.tr$", b"incomplete")      # write was interrupted: delete
+    env.put("1.pk$", b"incomplete")      # write was interrupted: delete
     env.put("2.PKT", packet([pmsg()]))
-    env.put("2.TR$", b"incomplete")
-    env.put("3.tr$", data)               # interrupted after delete: restore
+    env.put("2.PK#", b"incomplete")
+    env.put("3.pk$", data)               # interrupted after delete: restore
+    env.put("4.PK#", data)               # in the same case
+    env.put("5.pK$", data)
+    env.put("6.Pk#", data)
     assert env.run().returncode == 0
-    assert env.files() == ["1.pkt", "2.PKT", "3.pkt"], env.files()
-    assert env.get("1.pkt") == env.get("3.pkt") == reference(data)[0]
+    assert env.files() == ["1.pkt", "2.PKT", "3.pkt", "4.PKT", "5.pKt", "6.PkT"], env.files()
+    assert env.get("1.pkt") == env.get("3.pkt") == env.get("4.PKT") == env.get("5.pKt") == \
+        env.get("6.PkT") == reference(data)[0]
     assert sorted(l for l in env.loglines("warn") if "temporary" in l[1]) == [
-        ("warn", "deleted incomplete temporary file 1.tr$"),
-        ("warn", "deleted incomplete temporary file 2.TR$"),
-        ("warn", "restored 3.pkt from temporary file 3.tr$")]
+        ("warn", "deleted incomplete temporary file 1.pk$"),
+        ("warn", "deleted incomplete temporary file 2.PK#"),
+        ("warn", "restored 3.pkt from temporary file 3.pk$"),
+        ("warn", "restored 4.PKT from temporary file 4.PK#"),
+        ("warn", "restored 5.pKt from temporary file 5.pK$"),
+        ("warn", "restored 6.PkT from temporary file 6.Pk#")]
     assert ("info", "processed 3.pkt: messages 1, modified 1") in env.loglines()
     env.cleanup()
 
@@ -724,7 +818,10 @@ def read_only_directory():
     assert r.returncode == 1
     assert env.get("1.pkt") == data and env.files() == ["1.pkt", "2.pkt"]
     assert [l for l in env.loglines() if l[0] != "info"] == [
-        ("err", "can't write 1.tr$: Permission denied, 1.pkt skipped")]
+        ("warn", "modifying 1.pkt"),
+        ("warn", "1.pkt #1: area NETMAIL, from Sysop (5020/1) to %s (5030/2), subject "
+         "\"Hello\": truncating toUserName 40 -> 35" % ("x" * 35)),
+        ("err", "can't write 1.pk$: Permission denied, 1.pkt skipped")]
     assert [l[1] for l in env.loglines("info")] == ["processed 2.pkt: messages 1, modified 0"]
     env.cleanup()
 
@@ -768,11 +865,11 @@ def idempotent():
     env.run()
     assert env.get("1.pkt") == first == reference(data)[0]
     warns = [l[1] for l in env.loglines("warn")]
-    assert len([w for w in warns if w.startswith("truncated ")]) == 9
+    assert len([w for w in warns if is_msg_line(w)]) == 3
     assert len([w for w in warns if "incomplete packet terminator" in w]) == 2
-    assert [l[1] for l in env.loglines("info")] == [
-        "processed 1.pkt: messages 3, modified 3",
-        "processed 1.pkt: messages 3, modified 0"]
+    assert [l for l in env.loglines() if l[1].startswith("processed ")] == [
+        ("info", "processed 1.pkt: messages 3, modified 3"),
+        ("info", "processed 1.pkt: messages 3, modified 0")]
     env.cleanup()
 
 

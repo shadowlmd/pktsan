@@ -12,10 +12,13 @@
  * that can not be parsed as packed messages, is kept byte for byte. The
  * strings are truncated in every message whose header can be read, even if
  * the rest of the message is cut off by the end of the file.
+ * A modified message is logged with the area from the AREA line, the
+ * strings as written and the addresses from the message header.
  * A packet is rewritten only when something has to be truncated: the new
- * packet is written to name.tr$, then name.pkt is deleted and name.tr$ is
- * renamed to name.pkt. A name.tr$ left by an interrupted run is deleted if
- * its packet still exists and renamed back to name.pkt otherwise.
+ * packet is written to name.pk$, then name.pkt is deleted and name.pk$ is
+ * renamed to name.pkt. A name.pk$ left by an interrupted run is deleted if
+ * its packet still exists and renamed back to name.pkt otherwise. The case
+ * of the extension is kept: NAME.PKT <-> NAME.PK#.
  *
  * Build: gcc -O2 -o pktsan pktsan.c
  *        (MinGW: gcc -O2 -static-libgcc -o pktsan.exe pktsan.c)
@@ -45,6 +48,7 @@
 
 #define PKT_HDR_SIZE 58   /* packet header */
 #define MSG_HDR_SIZE 34   /* messageType .. DateTime */
+#define LINE_SIZE    256  /* start of the text kept for the AREA line */
 
 #define LOG_ERR   0   /* a packet or a file is skipped */
 #define LOG_WARN  1   /* a problem pktsan fixed or worked around */
@@ -58,12 +62,18 @@ static const long   FieldSize[3] = { 36, 36, 72 };
 
 typedef struct
 {
-    long msg;      /* message number in the packet, from 1 */
-    int  field;    /* index in FieldName */
-    long len;      /* original length without the null */
     long at;       /* offset of the first byte cut off */
     long cut;      /* number of bytes cut off */
 } Trunc;
+
+/* A message being scanned, for the log */
+typedef struct
+{
+    unsigned char Hdr[MSG_HDR_SIZE];
+    char Str[3][72];         /* toUserName, fromUserName, subject, truncated */
+    long Len[3];             /* original length if truncated, else 0 */
+    char Text[LINE_SIZE];    /* start of the text */
+} Msg;
 
 /* The result of ScanPacket() */
 typedef struct
@@ -77,6 +87,7 @@ typedef struct
     long    OutLen;   /* file size after truncation */
     Trunc * Tr;       /* truncations in file order (allocated) */
     long    TrCount;
+    int     NoMem;    /* no memory for more truncations, scan stopped */
 } Scan;
 
 /* ------------------------------------------------------------------ */
@@ -89,6 +100,7 @@ static void Log(int Level, const char * Fmt, ...)
     struct tm * tm;
     char Stamp[32] = "0000-00-00 00:00:00";
     FILE * fh;
+    int Err = errno; /* kept for the caller's error message */
 
     if(Level > LogLevel)
     {
@@ -110,6 +122,7 @@ static void Log(int Level, const char * Fmt, ...)
     va_end(ap);
     fputc('\n', fh);
     fflush(fh);
+    errno = Err;
 }
 
 static void * Alloc(size_t Size)
@@ -130,15 +143,37 @@ static char * StrDup(const char * s)
     return strcpy((char *)Alloc(strlen(s) + 1), s);
 }
 
-/* "name.xxx" -> "name" + Ext */
-static char * ChangeExt(const char * Name, const char * Ext)
+/*
+ * Grows array P of N elements of Size bytes by one element. Returns NULL,
+ * keeping P, if the new size does not fit in size_t or there is no memory.
+ */
+static void * Grow(void * P, long N, size_t Size)
 {
-    size_t l = strlen(Name) - 4;
-    char * p = (char *)Alloc(l + strlen(Ext) + 1);
+    if((unsigned long)N >= (size_t)-1 / Size)
+    {
+        return NULL;
+    }
 
-    memcpy(p, Name, l);
-    strcpy(p + l, Ext);
-    return p;
+    return realloc(P, (size_t)(N + 1) * Size);
+}
+
+/*
+ * "name.pkt" <-> "name.pk$", "NAME.PKT" <-> "NAME.PK#": the extension of a
+ * packet <-> of its temporary file
+ */
+static char * SwapExt(const char * Name)
+{
+    static const char Swap[] = "t$T#";
+    char * s = StrDup(Name);
+    char * e = s + strlen(s) - 1;
+    const char * q = strchr(Swap, *e);
+
+    if(q != NULL)
+    {
+        *e = Swap[(q - Swap) ^ 1];
+    }
+
+    return s;
 }
 
 /* Dir + separator + Name; the separator follows the style of Dir */
@@ -170,17 +205,24 @@ static int HasExt(const char * Name, const char * Ext)
 /* ------------------------------------------------------------------ */
 /* Configuration                                                      */
 
+/* The file name of Path without the directory */
+static const char * BaseName(const char * Path)
+{
+    const char * p = Path + strlen(Path);
+
+    while(p > Path && p[-1] != '/' && p[-1] != '\\' && p[-1] != ':')
+    {
+        p--;
+    }
+
+    return p;
+}
+
 /* Name in the directory of Path: "dir/file" + Name -> "dir/Name" */
 static char * SameDir(const char * Path, const char * Name)
 {
-    size_t l = strlen(Path);
+    size_t l = (size_t)(BaseName(Path) - Path);
     char * p;
-
-    while(l > 0 && Path[l - 1] != '/' && Path[l - 1] != '\\' &&
-          Path[l - 1] != ':')
-    {
-        l--;
-    }
 
     p = (char *)Alloc(l + strlen(Name) + 1);
     memcpy(p, Path, l);
@@ -290,18 +332,151 @@ static int ReadConfig(const char * Path, int Required, char ** LogFile)
 /* ------------------------------------------------------------------ */
 /* Packet processing                                                  */
 
+static unsigned Word(const unsigned char * p)
+{
+    return p[0] | ((unsigned)p[1] << 8);
+}
+
+/* zone:net/node.point, without "zone:" if 0 and without ".point" if 0 */
+static char * FormatAddr(char * p, unsigned Zone, unsigned Net, unsigned Node,
+                         unsigned Point)
+{
+    if(Zone != 0)
+    {
+        p += sprintf(p, "%u:", Zone);
+    }
+
+    p += sprintf(p, "%u/%u", Net, Node);
+
+    if(Point != 0)
+    {
+        p += sprintf(p, ".%u", Point);
+    }
+
+    return p;
+}
+
+/*
+ * Path + " (orig -> dest)" from packet header Hdr: type 2+ (FSC-0039,
+ * FSC-0048), type 2.2 (FSC-0045) or type 2 (FTS-0001, zones from QMail).
+ */
+static char * PktName(const char * Path, const unsigned char * Hdr)
+{
+    unsigned OZone = Word(Hdr + 34), DZone = Word(Hdr + 36);
+    unsigned ONet  = Word(Hdr + 20), DNet  = Word(Hdr + 22);
+    unsigned OPt   = 0,              DPt   = 0;
+    unsigned Cw    = Word(Hdr + 44), CwCopy = Word(Hdr + 40);
+    char * s = (char *)Alloc(strlen(Path) + 64);
+    char * p;
+
+    if((Cw & 1) != 0 && Cw == (((CwCopy & 0xFF) << 8) | (CwCopy >> 8)))
+    {
+        if(Word(Hdr + 46) != 0)
+        {
+            OZone = Word(Hdr + 46);
+            DZone = Word(Hdr + 48);
+        }
+
+        OPt = Word(Hdr + 50);
+        DPt = Word(Hdr + 52);
+
+        if(OPt != 0 && ONet == 0xFFFF)
+        {
+            ONet = Word(Hdr + 38); /* FSC-0048 AuxNet */
+        }
+    }
+    else if(Word(Hdr + 16) == 2)
+    {
+        OPt = Word(Hdr + 4);
+        DPt = Word(Hdr + 6);
+    }
+
+    p  = s + sprintf(s, "%s (", Path);
+    p  = FormatAddr(p, OZone, ONet, Word(Hdr + 0), OPt);
+    p += sprintf(p, " -> ");
+    p  = FormatAddr(p, DZone, DNet, Word(Hdr + 2), DPt);
+    strcpy(p, ")");
+    return s;
+}
+
+/* Control characters -> '?' */
+static void Clean(char * s)
+{
+    for(; *s != '\0'; s++)
+    {
+        if((unsigned char)*s < 0x20 || *s == 0x7F)
+        {
+            *s = '?';
+        }
+    }
+}
+
+/*
+ * Logs modified message N of packet Path: "name.pkt #N: area tag, from
+ * name (net/node) to name (net/node), subject "subject": truncating ...".
+ * The area is from the AREA line (FTS-0004: the first line of the text);
+ * without it the area is NETMAIL and the recipient has an address.
+ */
+static void LogMsg(const char * Path, long N, Msg * M)
+{
+    static char Line[LINE_SIZE + 384];
+    const char * Area = NULL;
+    const char * Sep = " ";
+    char * p;
+    int i;
+
+    M->Text[strcspn(M->Text, "\r")] = '\0';
+    Clean(M->Text);
+
+    for(i = 0; i < 3; i++)
+    {
+        Clean(M->Str[i]);
+    }
+
+    if(strncmp(M->Text, "AREA:", 5) == 0)
+    {
+        Area = (M->Text[5] != '\0') ? M->Text + 5 : "<empty>";
+    }
+
+    p = Line + sprintf(Line, "area %s, from %s (%u/%u) to %s",
+                       (Area != NULL) ? Area : "NETMAIL", M->Str[1],
+                       Word(M->Hdr + 6), Word(M->Hdr + 2), M->Str[0]);
+
+    if(Area == NULL)
+    {
+        p += sprintf(p, " (%u/%u)", Word(M->Hdr + 8), Word(M->Hdr + 4));
+    }
+
+    p += sprintf(p, ", subject \"%s\": truncating", M->Str[2]);
+
+    for(i = 0; i < 3; i++)
+    {
+        if(M->Len[i] != 0)
+        {
+            p += sprintf(p, "%s%s %ld -> %ld", Sep, FieldName[i], M->Len[i],
+                         FieldSize[i] - 1);
+            Sep = ", ";
+        }
+    }
+
+    Log(LOG_WARN, "%s #%ld: %s", BaseName(Path), N, Line);
+}
+
 /*
  * Reads the packet and finds the strings to truncate. A message cut off by
  * the end of the file is counted too, and its complete strings are
- * truncated; the start of such a message is the Tail.
+ * truncated; the start of such a message is the Tail. Logs each modified
+ * message, and the packet Path before the first one.
  */
-static void ScanPacket(FILE * fh, Scan * S)
+static void ScanPacket(FILE * fh, const char * Path, Scan * S)
 {
-    long pos = 0, TrAlloc = 0, Cut = 0;
+    static Msg M;
+    long pos = 0, Cut = 0;
     int c;
 
     S->Tr      = NULL;
     S->TrCount = 0;
+    S->NoMem   = 0;
     S->Msgs    = 0;
     S->Mod     = 0;
     S->Tail    = 0;
@@ -317,6 +492,7 @@ static void ScanPacket(FILE * fh, Scan * S)
     while(pos >= PKT_HDR_SIZE)
     {
         long Start = pos;
+        long First = S->TrCount; /* the first truncation in this message */
         int i;
 
         S->Tail = Start;
@@ -330,10 +506,11 @@ static void ScanPacket(FILE * fh, Scan * S)
         }
 
         S->Msgs++;
+        memset(&M, 0, sizeof(M));
 
-        while(pos - Start < MSG_HDR_SIZE && getc(fh) != EOF)
+        while(pos - Start < MSG_HDR_SIZE && (c = getc(fh)) != EOF)
         {
-            pos++;
+            M.Hdr[pos++ - Start] = (unsigned char)c;
         }
 
         if(pos - Start < MSG_HDR_SIZE)
@@ -345,10 +522,20 @@ static void ScanPacket(FILE * fh, Scan * S)
         {
             long f = pos;
             long l;
+            Trunc * p;
             Trunc * t;
 
             while((c = getc(fh)) != EOF && c != 0)
             {
+                if(i < 3 && pos - f < FieldSize[i] - 1)
+                {
+                    M.Str[i][pos - f] = (char)c;
+                }
+                else if(i == 3 && pos - f < LINE_SIZE - 1)
+                {
+                    M.Text[pos - f] = (char)c;
+                }
+
                 pos++;
             }
 
@@ -365,34 +552,33 @@ static void ScanPacket(FILE * fh, Scan * S)
                 continue;
             }
 
-            if(S->TrCount == TrAlloc)
+            p = (Trunc *)Grow(S->Tr, S->TrCount, sizeof(Trunc));
+
+            if(p == NULL)
             {
-                Trunc * p;
-
-                TrAlloc = TrAlloc ? TrAlloc * 2 : 16;
-                p = (Trunc *)realloc(S->Tr, TrAlloc * sizeof(Trunc));
-
-                if(p == NULL)
-                {
-                    fprintf(stderr, PROGNAME ": out of memory\n");
-                    exit(1);
-                }
-
-                S->Tr = p;
+                S->NoMem = 1;
+                break;
             }
 
-            if(S->TrCount == 0 || S->Tr[S->TrCount - 1].msg != S->Msgs)
-            {
-                S->Mod++;
-            }
-
+            S->Tr    = p;
             t        = &S->Tr[S->TrCount++];
-            t->msg   = S->Msgs;
-            t->field = i;
-            t->len   = l;
             t->at    = f + FieldSize[i] - 1;
             t->cut   = l - (FieldSize[i] - 1);
+            M.Len[i] = l;
             Cut     += t->cut;
+        }
+
+        if(S->TrCount > First && !S->NoMem)
+        {
+            if(++S->Mod == 1)
+            {
+                char * Name = PktName(Path, S->Hdr);
+
+                Log(LOG_WARN, "modifying %s", Name);
+                free(Name);
+            }
+
+            LogMsg(Path, S->Msgs, &M);
         }
 
         if(i < 4)
@@ -480,73 +666,6 @@ static int WritePkt(const char * Path, const char * Tmp, const Scan * S)
     return Ok && stat(Tmp, &st) == 0 && (long)st.st_size == S->OutLen;
 }
 
-static unsigned Word(const unsigned char * p)
-{
-    return p[0] | ((unsigned)p[1] << 8);
-}
-
-/* zone:net/node.point, without "zone:" if 0 and without ".point" if 0 */
-static char * FormatAddr(char * p, unsigned Zone, unsigned Net, unsigned Node,
-                         unsigned Point)
-{
-    if(Zone != 0)
-    {
-        p += sprintf(p, "%u:", Zone);
-    }
-
-    p += sprintf(p, "%u/%u", Net, Node);
-
-    if(Point != 0)
-    {
-        p += sprintf(p, ".%u", Point);
-    }
-
-    return p;
-}
-
-/*
- * Path + " (orig -> dest)" from packet header Hdr: type 2+ (FSC-0039,
- * FSC-0048), type 2.2 (FSC-0045) or type 2 (FTS-0001, zones from QMail).
- */
-static char * PktName(const char * Path, const unsigned char * Hdr)
-{
-    unsigned OZone = Word(Hdr + 34), DZone = Word(Hdr + 36);
-    unsigned ONet  = Word(Hdr + 20), DNet  = Word(Hdr + 22);
-    unsigned OPt   = 0,              DPt   = 0;
-    unsigned Cw    = Word(Hdr + 44), CwCopy = Word(Hdr + 40);
-    char * s = (char *)Alloc(strlen(Path) + 64);
-    char * p;
-
-    if((Cw & 1) != 0 && Cw == (((CwCopy & 0xFF) << 8) | (CwCopy >> 8)))
-    {
-        if(Word(Hdr + 46) != 0)
-        {
-            OZone = Word(Hdr + 46);
-            DZone = Word(Hdr + 48);
-        }
-
-        OPt = Word(Hdr + 50);
-        DPt = Word(Hdr + 52);
-
-        if(OPt != 0 && ONet == 0xFFFF)
-        {
-            ONet = Word(Hdr + 38); /* FSC-0048 AuxNet */
-        }
-    }
-    else if(Word(Hdr + 16) == 2)
-    {
-        OPt = Word(Hdr + 4);
-        DPt = Word(Hdr + 6);
-    }
-
-    p  = s + sprintf(s, "%s (", Path);
-    p  = FormatAddr(p, OZone, ONet, Word(Hdr + 0), OPt);
-    p += sprintf(p, " -> ");
-    p  = FormatAddr(p, DZone, DNet, Word(Hdr + 2), DPt);
-    strcpy(p, ")");
-    return s;
-}
-
 /*
  * Writes the truncated packet Path to Tmp, replaces Path with it and
  * restores the file time from st. Name is Path for the log. Returns 0 on
@@ -600,7 +719,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
     struct stat st;
     FILE * fh;
     Scan S;
-    long Rest, i;
+    long Rest;
     int Bad;
     char * Name = NULL;   /* Path with the addresses, once the header is read */
     int Rc = 1;
@@ -623,7 +742,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 
     errno = 0; /* fopen() may set it even on success */
 
-    ScanPacket(fh, &S);
+    ScanPacket(fh, Path, &S);
     Bad = ferror(fh);
     fclose(fh);
 
@@ -643,6 +762,13 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 
     Name = PktName(Path, S.Hdr);
     Rest = S.Size - S.Tail;
+
+    if(S.NoMem)
+    {
+        Log(LOG_ERR, "%s: not enough memory to truncate more than %ld "
+            "strings, skipped", Name, S.TrCount);
+        goto done;
+    }
 
     if(Rest == 2 && S.B0 == 0 && S.B1 == 0)
     {
@@ -689,15 +815,6 @@ static int ProcessPacket(const char * Path, const char * Tmp)
         goto done;
     }
 
-    for(i = 0; i < S.TrCount; i++)
-    {
-        const Trunc * t = &S.Tr[i];
-
-        Log(LOG_WARN, "truncated %s to %ld bytes (was %ld) in message #%ld "
-            "in %s", FieldName[t->field], t->len - t->cut, t->len, t->msg,
-            Name);
-    }
-
     Log(LOG_INFO, "processed %s: messages %ld, modified %ld", Name, S.Msgs,
         S.Mod);
     Rc = 0;
@@ -711,24 +828,17 @@ done:
 /* ------------------------------------------------------------------ */
 /* Directory scanning                                                 */
 
-static void AddName(char *** List, long * Count, long * Size, char * Name)
+static void AddName(char *** List, long * Count, char * Name)
 {
-    if(*Count == *Size)
+    char ** l = (char **)Grow(*List, *Count, sizeof(char *));
+
+    if(l == NULL)
     {
-        char ** l;
-
-        *Size = *Size ? *Size * 2 : 64;
-        l = (char **)realloc(*List, *Size * sizeof(char *));
-
-        if(l == NULL)
-        {
-            fprintf(stderr, PROGNAME ": out of memory\n");
-            exit(1);
-        }
-
-        *List = l;
+        fprintf(stderr, PROGNAME ": out of memory\n");
+        exit(1);
     }
 
+    *List = l;
     (*List)[(*Count)++] = Name;
 }
 
@@ -752,7 +862,7 @@ static int ProcessDir(const char * Dir)
 {
     char ** Pkts = NULL;
     char ** Tmps = NULL;
-    long NPkts = 0, SPkts = 0, NTmps = 0, STmps = 0, i;
+    long NPkts = 0, NTmps = 0, i;
     int Errors = 0;
     DIR * d;
     struct dirent * de;
@@ -770,7 +880,7 @@ static int ProcessDir(const char * Dir)
     {
         int Pkt = HasExt(de->d_name, ".pkt");
 
-        if(Pkt || HasExt(de->d_name, ".tr$"))
+        if(Pkt || HasExt(de->d_name, ".pk$") || HasExt(de->d_name, ".pk#"))
         {
             char * Path = JoinPath(Dir, de->d_name);
             struct stat st;
@@ -779,11 +889,11 @@ static int ProcessDir(const char * Dir)
 
             if(Reg && Pkt)
             {
-                AddName(&Pkts, &NPkts, &SPkts, StrDup(de->d_name));
+                AddName(&Pkts, &NPkts, StrDup(de->d_name));
             }
             else if(Reg)
             {
-                AddName(&Tmps, &NTmps, &STmps, StrDup(de->d_name));
+                AddName(&Tmps, &NTmps, StrDup(de->d_name));
             }
 
             free(Path);
@@ -795,7 +905,7 @@ static int ProcessDir(const char * Dir)
     /* temporary files left by an interrupted run */
     for(i = 0; i < NTmps; i++)
     {
-        char * Name  = ChangeExt(Tmps[i], ".pkt");
+        char * Name  = SwapExt(Tmps[i]);
         char * PTmp  = JoinPath(Dir, Tmps[i]);
         char * PName = JoinPath(Dir, Name);
 
@@ -817,7 +927,7 @@ static int ProcessDir(const char * Dir)
         else if(rename(PTmp, PName) == 0)
         {
             Log(LOG_WARN, "restored %s from temporary file %s", PName, PTmp);
-            AddName(&Pkts, &NPkts, &SPkts, Name);
+            AddName(&Pkts, &NPkts, Name);
         }
         else
         {
@@ -836,7 +946,7 @@ static int ProcessDir(const char * Dir)
 
     for(i = 0; i < NPkts; i++)
     {
-        char * Tmp   = ChangeExt(Pkts[i], ".tr$");
+        char * Tmp   = SwapExt(Pkts[i]);
         char * PPkt  = JoinPath(Dir, Pkts[i]);
         char * PTmp  = JoinPath(Dir, Tmp);
 
