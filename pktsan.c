@@ -337,20 +337,27 @@ static unsigned Word(const unsigned char * p)
     return p[0] | ((unsigned)p[1] << 8);
 }
 
+/* Signed 16-bit number: a part of an address (-1 in address requests) */
+static int SWord(const unsigned char * p)
+{
+    unsigned w = Word(p);
+
+    return (w & 0x8000) ? -(int)(~w & 0x7FFF) - 1 : (int)w;
+}
+
 /* zone:net/node.point, without "zone:" if 0 and without ".point" if 0 */
-static char * FormatAddr(char * p, unsigned Zone, unsigned Net, unsigned Node,
-                         unsigned Point)
+static char * FormatAddr(char * p, int Zone, int Net, int Node, int Point)
 {
     if(Zone != 0)
     {
-        p += sprintf(p, "%u:", Zone);
+        p += sprintf(p, "%d:", Zone);
     }
 
-    p += sprintf(p, "%u/%u", Net, Node);
+    p += sprintf(p, "%d/%d", Net, Node);
 
     if(Point != 0)
     {
-        p += sprintf(p, ".%u", Point);
+        p += sprintf(p, ".%d", Point);
     }
 
     return p;
@@ -362,10 +369,10 @@ static char * FormatAddr(char * p, unsigned Zone, unsigned Net, unsigned Node,
  */
 static char * PktName(const char * Path, const unsigned char * Hdr)
 {
-    unsigned OZone = Word(Hdr + 34), DZone = Word(Hdr + 36);
-    unsigned ONet  = Word(Hdr + 20), DNet  = Word(Hdr + 22);
-    unsigned OPt   = 0,              DPt   = 0;
-    unsigned Cw    = Word(Hdr + 44), CwCopy = Word(Hdr + 40);
+    int      OZone = SWord(Hdr + 34), DZone = SWord(Hdr + 36);
+    int      ONet  = SWord(Hdr + 20), DNet  = SWord(Hdr + 22);
+    int      OPt   = 0,               DPt   = 0;
+    unsigned Cw    = Word(Hdr + 44),  CwCopy = Word(Hdr + 40);
     char * s = (char *)Alloc(strlen(Path) + 64);
     char * p;
 
@@ -373,28 +380,28 @@ static char * PktName(const char * Path, const unsigned char * Hdr)
     {
         if(Word(Hdr + 46) != 0)
         {
-            OZone = Word(Hdr + 46);
-            DZone = Word(Hdr + 48);
+            OZone = SWord(Hdr + 46);
+            DZone = SWord(Hdr + 48);
         }
 
-        OPt = Word(Hdr + 50);
-        DPt = Word(Hdr + 52);
+        OPt = SWord(Hdr + 50);
+        DPt = SWord(Hdr + 52);
 
-        if(OPt != 0 && ONet == 0xFFFF)
+        if(OPt != 0 && ONet == -1)
         {
-            ONet = Word(Hdr + 38); /* FSC-0048 AuxNet */
+            ONet = SWord(Hdr + 38); /* FSC-0048 AuxNet */
         }
     }
     else if(Word(Hdr + 16) == 2)
     {
-        OPt = Word(Hdr + 4);
-        DPt = Word(Hdr + 6);
+        OPt = SWord(Hdr + 4);
+        DPt = SWord(Hdr + 6);
     }
 
     p  = s + sprintf(s, "%s (", Path);
-    p  = FormatAddr(p, OZone, ONet, Word(Hdr + 0), OPt);
+    p  = FormatAddr(p, OZone, ONet, SWord(Hdr + 0), OPt);
     p += sprintf(p, " -> ");
-    p  = FormatAddr(p, DZone, DNet, Word(Hdr + 2), DPt);
+    p  = FormatAddr(p, DZone, DNet, SWord(Hdr + 2), DPt);
     strcpy(p, ")");
     return s;
 }
@@ -412,7 +419,7 @@ static void Clean(char * s)
 }
 
 /*
- * Logs modified message N of packet Path: "name.pkt #N: area tag, from
+ * Logs modified message N of packet Path: "name.pkt: msg N, area tag, from
  * name (net/node) to name (net/node), subject "subject": truncating ...".
  * The area is from the AREA line (FTS-0004: the first line of the text);
  * without it the area is NETMAIL and the recipient has an address.
@@ -438,13 +445,13 @@ static void LogMsg(const char * Path, long N, Msg * M)
         Area = (M->Text[5] != '\0') ? M->Text + 5 : "<empty>";
     }
 
-    p = Line + sprintf(Line, "area %s, from %s (%u/%u) to %s",
+    p = Line + sprintf(Line, "msg %ld, area %s, from %s (%d/%d) to %s", N,
                        (Area != NULL) ? Area : "NETMAIL", M->Str[1],
-                       Word(M->Hdr + 6), Word(M->Hdr + 2), M->Str[0]);
+                       SWord(M->Hdr + 6), SWord(M->Hdr + 2), M->Str[0]);
 
     if(Area == NULL)
     {
-        p += sprintf(p, " (%u/%u)", Word(M->Hdr + 8), Word(M->Hdr + 4));
+        p += sprintf(p, " (%d/%d)", SWord(M->Hdr + 8), SWord(M->Hdr + 4));
     }
 
     p += sprintf(p, ", subject \"%s\": truncating", M->Str[2]);
@@ -459,7 +466,7 @@ static void LogMsg(const char * Path, long N, Msg * M)
         }
     }
 
-    Log(LOG_WARN, "%s #%ld: %s", BaseName(Path), N, Line);
+    Log(LOG_WARN, "%s: %s", BaseName(Path), Line);
 }
 
 /*
