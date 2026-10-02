@@ -114,14 +114,14 @@ fields with their lengths in bytes before and after.
 ```
 2026-09-26 19:42:46 [info] processing directory c:\ftn\inbound
 2026-09-26 19:42:46 [info] processing directory c:\ftn\inbound\temp
-2026-09-26 19:42:46 [warn] modifying c:\ftn\inbound\temp\1234abcd.pkt (2:999/999 -> 2:5030/1997)
-2026-09-26 19:42:46 [warn] 1234abcd.pkt: msg 32, area GENERAL.TEST, from Ivan Petrov (999/999) to All, subject "Re: Configuring FastEcho to toss packets from the unpack directory befo": truncating subject 91 -> 71
-2026-09-26 19:42:46 [warn] 1234abcd.pkt: msg 35, area NETMAIL, from Sysop (999/999) to Jean-Claude Camille Francois Van Va (5030/1997), subject "Fan mail": truncating toUserName 42 -> 35
-2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\1234abcd.pkt (2:999/999 -> 2:5030/1997): messages 40, modified 2
 2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\5678ef01.pkt (2:5030/1997.1 -> 2:5030/1997): messages 12, modified 0
 2026-09-26 19:42:46 [warn] c:\ftn\inbound\temp\6ab6fb20.pkt (2:50/4 -> 2:5030/1997): incomplete packet terminator after message #1 (1 byte at offset 662), kept as is
 2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\6ab6fb20.pkt (2:50/4 -> 2:5030/1997): messages 1, modified 0
 2026-09-26 19:42:46 [err] c:\ftn\inbound\temp\9abc0123.pkt is not a packet: only 12 bytes, shorter than a packet header, skipped
+2026-09-26 19:42:46 [warn] modifying c:\ftn\inbound\temp\1234abcd.pkt (2:999/999 -> 2:5030/1997)
+2026-09-26 19:42:46 [warn] 1234abcd.pkt: msg 32, area GENERAL.TEST, from Ivan Petrov (999/999) to All, subject "Re: Configuring FastEcho to toss packets from the unpack directory befo": truncating subject 91 -> 71
+2026-09-26 19:42:46 [warn] 1234abcd.pkt: msg 35, area NETMAIL, from Sysop (999/999) to Jean-Claude Camille Francois Van Va (5030/1997), subject "Fan mail": truncating toUserName 42 -> 35
+2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\1234abcd.pkt (2:999/999 -> 2:5030/1997): messages 40, modified 2
 ```
 
 ## Building

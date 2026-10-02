@@ -485,8 +485,9 @@ static void LogMsg(const char * Path, long N, Msg * M)
 /*
  * Reads the packet and finds the strings to truncate. A message cut off by
  * the end of the file is counted too, and its complete strings are
- * truncated; the start of such a message is the Tail. Logs each modified
- * message, and the packet Path before the first one.
+ * truncated; the start of such a message is the Tail. If Path is not
+ * NULL, logs each modified message, and the packet Path before the first
+ * one.
  */
 static void ScanPacket(FILE * fh, const char * Path, Scan * S)
 {
@@ -590,7 +591,7 @@ static void ScanPacket(FILE * fh, const char * Path, Scan * S)
 
         if(S->TrCount > First && !S->NoMem)
         {
-            if(++S->Mod == 1)
+            if(++S->Mod == 1 && Path != NULL)
             {
                 char * Name = PktName(Path, S->Hdr);
 
@@ -598,7 +599,10 @@ static void ScanPacket(FILE * fh, const char * Path, Scan * S)
                 free(Name);
             }
 
-            LogMsg(Path, S->Msgs, &M);
+            if(Path != NULL)
+            {
+                LogMsg(Path, S->Msgs, &M);
+            }
         }
 
         if(i < 4)
@@ -733,7 +737,11 @@ static int ReplacePkt(const char * Path, const char * Tmp, const char * Name,
     return 1;
 }
 
-/* Path and Tmp include the directory. Returns 0 on success, 1 on error. */
+/*
+ * Path and Tmp include the directory. Returns 0 on success, 1 on error.
+ * With Tmp NULL only checks the packet: if it needs changes, logs nothing
+ * and returns 2.
+ */
 static int ProcessPacket(const char * Path, const char * Tmp)
 {
     struct stat st;
@@ -762,7 +770,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 
     errno = 0; /* fopen() may set it even on success */
 
-    ScanPacket(fh, Path, &S);
+    ScanPacket(fh, (Tmp != NULL) ? Path : NULL, &S);
     Bad = ferror(fh);
     fclose(fh);
 
@@ -777,6 +785,12 @@ static int ProcessPacket(const char * Path, const char * Tmp)
     {
         Log(LOG_ERR, "%s is not a packet: only %ld bytes, shorter than a "
             "packet header, skipped", Path, S.Size);
+        goto done;
+    }
+
+    if(Tmp == NULL && (S.TrCount > 0 || S.NoMem))
+    {
+        Rc = 2;
         goto done;
     }
 
@@ -848,41 +862,79 @@ done:
 /* ------------------------------------------------------------------ */
 /* Directory scanning                                                 */
 
-static void AddName(char *** List, long * Count, char * Name)
+/*
+ * Handles temporary file Name in Dir left by an interrupted run: deletes it
+ * if its packet exists, otherwise renames it back to the packet. Returns 0
+ * on success, 1 on error.
+ */
+static int RestoreTmp(const char * Dir, const char * Name)
 {
-    char ** l = (char **)Grow(*List, *Count, sizeof(char *));
+    char * Pkt   = SwapExt(Name);
+    char * PTmp  = JoinPath(Dir, Name);
+    char * PPkt  = JoinPath(Dir, Pkt);
+    struct stat st;
+    int Rc = 1;
 
-    if(l == NULL)
+    if(stat(PPkt, &st) == 0)
     {
-        fprintf(stderr, PROGNAME ": out of memory\n");
-        exit(1);
-    }
-
-    *List = l;
-    (*List)[(*Count)++] = Name;
-}
-
-static int HasName(char ** List, long Count, const char * Name)
-{
-    long i;
-
-    for(i = 0; i < Count; i++)
-    {
-        if(strcmp(List[i], Name) == 0)
+        if(remove(PTmp) == 0)
         {
-            return 1;
+            Log(LOG_WARN, "deleted incomplete temporary file %s", PTmp);
+            Rc = 0;
+        }
+        else
+        {
+            Log(LOG_ERR, "can't delete temporary file %s: %s", PTmp,
+                strerror(errno));
         }
     }
+    else if(errno != ENOENT)
+    {
+        /* rename() could replace a packet that does exist */
+        Log(LOG_ERR, "can't stat %s: %s, temporary file %s kept", PPkt,
+            strerror(errno), PTmp);
+    }
+    else if(rename(PTmp, PPkt) == 0)
+    {
+        Log(LOG_WARN, "restored %s from temporary file %s", PPkt, PTmp);
+        Rc = 0;
+    }
+    else
+    {
+        Log(LOG_ERR, "can't restore %s from temporary file %s: %s, "
+            "retried on the next run", PPkt, PTmp, strerror(errno));
+    }
 
-    return 0;
+    free(Pkt);
+    free(PTmp);
+    free(PPkt);
+    return Rc;
 }
 
-/* Processes directory Dir. Returns the number of errors. */
+/*
+ * Name in Dir is not a directory or another special file. If stat() fails,
+ * it counts as a file: processing it logs the error.
+ */
+static int IsFile(const char * Dir, const char * Name)
+{
+    char * Path = JoinPath(Dir, Name);
+    struct stat st;
+    int Rc = stat(Path, &st) != 0 || S_ISREG(st.st_mode);
+
+    free(Path);
+    return Rc;
+}
+
+/*
+ * Processes directory Dir. Returns the number of errors. The directory is
+ * listed twice: first the temporary files left by an interrupted run are
+ * handled, then the packets are checked; the packets that need changes are
+ * processed after the listing.
+ */
 static int ProcessDir(const char * Dir)
 {
-    char ** Pkts = NULL;
-    char ** Tmps = NULL;
-    long NPkts = 0, NTmps = 0, i;
+    char ** Mods = NULL;   /* packets that need changes */
+    long NMods = 0, i;
     int Errors = 0;
     DIR * d;
     struct dirent * de;
@@ -898,22 +950,44 @@ static int ProcessDir(const char * Dir)
 
     while((de = readdir(d)) != NULL)
     {
-        int Pkt = HasExt(de->d_name, ".pkt");
+        if((HasExt(de->d_name, ".pk$") || HasExt(de->d_name, ".pk#")) &&
+           IsFile(Dir, de->d_name))
+        {
+            Errors += RestoreTmp(Dir, de->d_name);
+        }
+    }
 
-        if(Pkt || HasExt(de->d_name, ".pk$") || HasExt(de->d_name, ".pk#"))
+    closedir(d);
+    d = opendir(Dir);
+
+    if(d == NULL)
+    {
+        Log(LOG_ERR, "can't read directory %s: %s", Dir, strerror(errno));
+        return Errors + 1;
+    }
+
+    while((de = readdir(d)) != NULL)
+    {
+        if(HasExt(de->d_name, ".pkt") && IsFile(Dir, de->d_name))
         {
             char * Path = JoinPath(Dir, de->d_name);
-            struct stat st;
-            /* a packet that can't be stat'ed is logged when processed */
-            int Reg = stat(Path, &st) != 0 || S_ISREG(st.st_mode);
+            int Rc = ProcessPacket(Path, NULL);
+            char ** p = (Rc == 2) ? (char **)Grow(Mods, NMods, sizeof(char *))
+                                  : NULL;
 
-            if(Reg && Pkt)
+            if(p != NULL)
             {
-                AddName(&Pkts, &NPkts, StrDup(de->d_name));
+                Mods = p;
+                Mods[NMods++] = StrDup(de->d_name);
             }
-            else if(Reg)
+            else if(Rc == 2)
             {
-                AddName(&Tmps, &NTmps, StrDup(de->d_name));
+                Log(LOG_ERR, "%s: not enough memory, skipped", Path);
+                Errors++;
+            }
+            else
+            {
+                Errors += Rc;
             }
 
             free(Path);
@@ -922,62 +996,20 @@ static int ProcessDir(const char * Dir)
 
     closedir(d);
 
-    /* temporary files left by an interrupted run */
-    for(i = 0; i < NTmps; i++)
+    for(i = 0; i < NMods; i++)
     {
-        char * Name  = SwapExt(Tmps[i]);
-        char * PTmp  = JoinPath(Dir, Tmps[i]);
-        char * PName = JoinPath(Dir, Name);
-
-        if(HasName(Pkts, NPkts, Name))
-        {
-            if(remove(PTmp) == 0)
-            {
-                Log(LOG_WARN, "deleted incomplete temporary file %s", PTmp);
-            }
-            else
-            {
-                Log(LOG_ERR, "can't delete temporary file %s: %s", PTmp,
-                    strerror(errno));
-                Errors++;
-            }
-
-            free(Name);
-        }
-        else if(rename(PTmp, PName) == 0)
-        {
-            Log(LOG_WARN, "restored %s from temporary file %s", PName, PTmp);
-            AddName(&Pkts, &NPkts, Name);
-        }
-        else
-        {
-            Log(LOG_ERR, "can't restore %s from temporary file %s: %s, "
-                "retried on the next run", PName, PTmp, strerror(errno));
-            Errors++;
-            free(Name);
-        }
-
-        free(PTmp);
-        free(PName);
-        free(Tmps[i]);
-    }
-
-    free(Tmps);
-
-    for(i = 0; i < NPkts; i++)
-    {
-        char * Tmp   = SwapExt(Pkts[i]);
-        char * PPkt  = JoinPath(Dir, Pkts[i]);
-        char * PTmp  = JoinPath(Dir, Tmp);
+        char * Tmp  = SwapExt(Mods[i]);
+        char * PPkt = JoinPath(Dir, Mods[i]);
+        char * PTmp = JoinPath(Dir, Tmp);
 
         Errors += ProcessPacket(PPkt, PTmp);
         free(PPkt);
         free(PTmp);
         free(Tmp);
-        free(Pkts[i]);
+        free(Mods[i]);
     }
 
-    free(Pkts);
+    free(Mods);
     return Errors;
 }
 

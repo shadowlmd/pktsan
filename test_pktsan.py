@@ -673,6 +673,24 @@ def relative_directory():
 
 
 @test
+def modified_after_listing():
+    """Packets that need changes are processed after the directory listing."""
+    env = Env()
+    for i in range(6):
+        env.put("%d.pkt" % i, packet([pmsg(to=b"x" * 40)] if i % 2 else [pmsg()]))
+    assert env.run().returncode == 0
+    lines = [l[1] for l in env.loglines() if l[1].startswith(("processed ", "modifying "))]
+    assert sorted(lines[:3]) == ["processed %d.pkt: messages 1, modified 0" % i
+                                 for i in (0, 2, 4)], lines
+    assert sorted(lines[3:]) == sorted(["modifying %d.pkt" % i for i in (1, 3, 5)] +
+                                       ["processed %d.pkt: messages 1, modified 1" % i
+                                        for i in (1, 3, 5)]), lines
+    for i in range(6):
+        assert env.get("%d.pkt" % i) == reference(env.get("%d.pkt" % i))[0]
+    env.cleanup()
+
+
+@test
 def unix_path_rules():
     """On Unix only '/' separates directories and there are no drives."""
     env = Env()
@@ -841,6 +859,24 @@ def temp_files_from_interrupted_run():
         ("warn", "restored 6.PkT from temporary file 6.Pk#"),
         ("warn", "restored 7.PKT from temporary file 7.PK#")]
     assert ("info", "processed 3.pkt: messages 1, modified 1") in env.loglines()
+    env.cleanup()
+
+
+@test
+def temp_file_kept_if_packet_unknown():
+    """A temporary file is kept if it is unknown whether its packet exists."""
+    if os.geteuid() == 0:
+        return
+    env = Env()
+    env.put("1.pk$", packet([pmsg()]))
+    os.chmod(env.dir, 0o444)  # listed, but stat() fails with EACCES
+    r = env.run()
+    os.chmod(env.dir, 0o755)
+    assert r.returncode == 1
+    assert env.files() == ["1.pk$"]
+    assert env.loglines() == [
+        ("err", "can't stat 1.pkt: Permission denied, temporary file 1.pk$ kept")], \
+        env.logtext()
     env.cleanup()
 
 
