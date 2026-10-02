@@ -176,6 +176,8 @@ class Env:
             print("   ", cmd, r.returncode, r.stdout, r.stderr)
         if b"Sanitizer" in r.stderr or b"runtime error" in r.stderr:
             raise AssertionError("sanitizer: " + r.stderr.decode(errors="replace"))
+        if "internal error" in self.logtext() or b"internal error" in r.stdout:
+            raise AssertionError("pktsan: " + self.logtext() + r.stdout.decode(errors="replace"))
         return r
 
     def logtext(self):
@@ -199,8 +201,8 @@ class Env:
             assert m, "bad log line: %r" % line
             text = m.group(2)
             # a modified message line starts with the packet name only
-            ismsg = re.match(r"[^\s/]*\.pkt: msg \d+, area ", text, re.I)
-            for f in re.findall(r"[^\s(]+\.(?:pkt|pk\$|pk#)", text[ismsg.end() if ismsg else 0:],
+            ismsg = re.match(r"[^\s/]*\.pkt#\d+: area ", text, re.I)
+            for f in re.findall(r"[^\s(]+\.(?:pkt|tr\$|tr#)", text[ismsg.end() if ismsg else 0:],
                                 re.I):
                 assert f.startswith(self.root + "/"), "no full path: %r" % line
             text = text.replace(prefix, "")
@@ -223,7 +225,7 @@ class Env:
 
 
 def is_msg_line(text):
-    return re.match(r"[^\s/]*\.pkt: msg \d+, area ", text, re.I) is not None
+    return re.match(r"[^\s/]*\.pkt#\d+: area ", text, re.I) is not None
 
 
 def msg_lines(tr, info, name):
@@ -231,7 +233,7 @@ def msg_lines(tr, info, name):
     fields = {}
     for m, f, ln in tr:
         fields.setdefault(m, []).append("%s %d -> %d" % (NAMES[f], ln, LIMITS[f] - 1))
-    return ["%s: msg %d, %s: truncating %s" % (os.path.basename(name), m, info[m], ", ".join(fs))
+    return ["%s#%d: %s: truncating %s" % (os.path.basename(name), m, info[m], ", ".join(fs))
             for m, fs in fields.items()]
 
 
@@ -275,7 +277,7 @@ def check_packet(env, name, data, r=None):
     elif "LogLevel info" in open(env.cfg).read():
         assert processed == [("info", "processed %s: messages %d, modified %d" % (
             name, n, mod))], processed
-    assert not [f for f in env.files() if f.lower().endswith((".pk$", ".pk#"))], env.files()
+    assert not [f for f in env.files() if f.lower().endswith((".tr$", ".tr#"))], env.files()
     # the addresses follow the packet name wherever the header was read
     full = os.path.join(env.dir, name)
     for line in env.logsplit():
@@ -330,7 +332,7 @@ def all_fields_long_log_format():
     assert tr == [(2, 0, 40), (2, 1, 36), (2, 2, 200)]
     assert env.loglines() == [
         ("warn", "modifying ab.pkt"),
-        ("warn", "ab.pkt: msg 2, area NETMAIL, from %s (5020/1) to %s (5030/2), subject \"%s\": "
+        ("warn", "ab.pkt#2: area NETMAIL, from %s (5020/1) to %s (5030/2), subject \"%s\": "
          "truncating toUserName 40 -> 35, fromUserName 36 -> 35, subject 200 -> 71"
          % ("F" * 35, "T" * 35, "S" * 71)),
         ("info", "processed ab.pkt: messages 2, modified 1")]
@@ -361,7 +363,7 @@ def message_info():
         assert reference(data)[4] == {1: info}, (text, reference(data)[4], info)
         check_packet(env, "m.pkt", data)
         assert env.loglines("warn")[1:] == [
-            ("warn", "m.pkt: msg 1, %s: truncating subject 80 -> 71" % info)], env.logtext()
+            ("warn", "m.pkt#1: %s: truncating subject 80 -> 71" % info)], env.logtext()
         env.cleanup()
     # strings as written, addresses from the message header
     for subj, shown in ((b"", ""), (b"x" * 71, "x" * 71), (b"a\rb", "a?b")):
@@ -370,7 +372,7 @@ def message_info():
         check_packet(env, "m.pkt", packet([pmsg(to=b"T" * 50, frm=b"A\tB\xa0\x85",
                                                 subj=subj, hdr=hdr)]))
         assert env.loglines("warn")[1:] == [
-            ("warn", 'm.pkt: msg 1, area NETMAIL, from A?B\xa0\x85 (33/11) to %s (44/22), '
+            ("warn", 'm.pkt#1: area NETMAIL, from A?B\xa0\x85 (33/11) to %s (44/22), '
              'subject "%s": truncating toUserName 50 -> 35' % ("T" * 35, shown))], env.logtext()
         env.cleanup()
     # nets and nodes are signed: -1 in requests for an address
@@ -378,7 +380,7 @@ def message_info():
     hdr = struct.pack("<HhhhhHH", 2, -1, -2, 5020, -32768, 0, 0)
     check_packet(env, "m.pkt", packet([pmsg(to=b"T" * 50, hdr=hdr)]))
     assert env.loglines("warn")[1:] == [
-        ("warn", 'm.pkt: msg 1, area NETMAIL, from Sysop (5020/-1) to %s (-32768/-2), '
+        ("warn", 'm.pkt#1: area NETMAIL, from Sysop (5020/-1) to %s (-32768/-2), '
          'subject "Hello": truncating toUserName 50 -> 35' % ("T" * 35))], env.logtext()
     env.cleanup()
 
@@ -589,7 +591,7 @@ def log_level_warn():
     assert env.run().returncode == 0
     # packets are processed in directory order
     assert sorted(env.loglines()) == [
-        ("warn", "2.pkt: msg 1, area NETMAIL, from Sysop (5020/1) to %s (5030/2), subject \"Hello\": "
+        ("warn", "2.pkt#1: area NETMAIL, from Sysop (5020/1) to %s (5030/2), subject \"Hello\": "
          "truncating toUserName 36 -> 35" % ("x" * 35)),
         ("warn", "3.pkt: incomplete packet terminator after message #1 (1 byte at offset %d), kept as is" % (58 + len(pmsg()))),
         ("warn", "modifying 2.pkt")]
@@ -673,20 +675,20 @@ def relative_directory():
 
 
 @test
-def modified_after_listing():
-    """Packets that need changes are processed after the directory listing."""
+def packets_rewritten_in_place():
+    """Each packet is processed once, a modified one keeps its directory entry."""
     env = Env()
+    inos = {}
     for i in range(6):
-        env.put("%d.pkt" % i, packet([pmsg(to=b"x" * 40)] if i % 2 else [pmsg()]))
+        p = env.put("%d.pkt" % i, packet([pmsg(to=b"x" * 40)] if i % 2 else [pmsg()]))
+        inos[i] = os.stat(p).st_ino
     assert env.run().returncode == 0
-    lines = [l[1] for l in env.loglines() if l[1].startswith(("processed ", "modifying "))]
-    assert sorted(lines[:3]) == ["processed %d.pkt: messages 1, modified 0" % i
-                                 for i in (0, 2, 4)], lines
-    assert sorted(lines[3:]) == sorted(["modifying %d.pkt" % i for i in (1, 3, 5)] +
-                                       ["processed %d.pkt: messages 1, modified 1" % i
-                                        for i in (1, 3, 5)]), lines
+    lines = [l[1] for l in env.loglines() if l[1].startswith("processed ")]
+    assert sorted(lines) == ["processed %d.pkt: messages 1, modified %d" % (i, i % 2)
+                             for i in range(6)], lines
     for i in range(6):
-        assert env.get("%d.pkt" % i) == reference(env.get("%d.pkt" % i))[0]
+        assert os.stat(os.path.join(env.dir, "%d.pkt" % i)).st_ino == inos[i], i
+    assert env.files() == ["%d.pkt" % i for i in range(6)], env.files()
     env.cleanup()
 
 
@@ -704,7 +706,7 @@ def unix_path_rules():
         assert env.run(dirs=[d], cwd=env.root).returncode == 0, d
         text = env.logtext()
         assert "processed %s/1.pkt (" % d in text, (d, text)
-        assert "] 1.pkt: msg 1, area NETMAIL" in text, (d, text)
+        assert "] 1.pkt#1: area NETMAIL" in text, (d, text)
         with open(os.path.join(env.root, d, "1.pkt"), "rb") as f:
             assert f.read() == reference(data)[0], d
     # a relative log path with ':' is relative to the config
@@ -757,7 +759,7 @@ def config_handling():
     assert r.returncode == 0, r
     with open(log) as f:
         text = f.read()
-    assert "[warn] 1.pkt: msg 1, area NETMAIL, " in text and "[info]" not in text
+    assert "[warn] 1.pkt#1: area NETMAIL, " in text and "[info]" not in text
     env.cleanup()
 
 
@@ -834,30 +836,48 @@ def arguments_rejected():
 def temp_files_from_interrupted_run():
     env = Env()
     data = packet([pmsg(to=b"x" * 40)])
+    fixed = reference(data)[0]
+    other = packet([pmsg(subj=b"other")])
     env.put("1.pkt", data)
-    env.put("1.pk$", b"incomplete")      # write was interrupted: delete
+    env.put("1.tr$", fixed[:30])         # interrupted writing it: deleted
     env.put("2.PKT", packet([pmsg()]))
-    env.put("2.PK#", b"incomplete")
-    env.put("3.pk$", data)               # interrupted after delete: restore
-    env.put("4.PK#", data)               # in the same case
-    env.put("5.pK$", data)
-    env.put("6.Pk#", data)
+    env.put("2.TR#", packet([pmsg()])[:20])
+    env.put("3.tr$", data)               # no packet: renamed to it
+    env.put("4.TR#", data)               # in the same case
+    env.put("5.tR$", data)
+    env.put("6.Tr#", data)
     env.put("7.pkt", packet([pmsg()]))  # another packet, not 7.PKT
-    env.put("7.PK#", data)
+    env.put("7.TR#", data)
+    env.put("8.pk$", b"other software")  # not ours: kept
+    env.put("9.pkt", fixed[:50])         # interrupted copying it: copied again
+    env.put("9.tr$", fixed)
+    env.put("10.pkt", data)              # complete, not copied yet: copied
+    env.put("10.tr$", fixed)
+    env.put("11.pkt", data)              # does not match: kept as a new packet
+    env.put("11.tr$", other)
     assert env.run().returncode == 0
-    assert env.files() == ["1.pkt", "2.PKT", "3.pkt", "4.PKT", "5.pKt", "6.PkT", "7.PKT",
-                           "7.pkt"], env.files()
-    assert env.get("1.pkt") == env.get("3.pkt") == env.get("4.PKT") == env.get("5.pKt") == \
-        env.get("6.PkT") == env.get("7.PKT") == reference(data)[0]
-    assert env.get("7.pkt") == packet([pmsg()])
+    known = ["1.pkt", "10.pkt", "11.pkt", "2.PKT", "3.pkt", "4.PKT", "5.pKt", "6.PkT",
+             "7.PKT", "7.pkt", "8.pk$", "9.pkt"]
+    new = [f for f in env.files() if f not in known]
+    assert sorted(set(env.files()) - set(new)) == sorted(known), env.files()
+    assert len(new) == 1 and re.match(r"[0-9a-f]{8}\.pkt$", new[0]), new
+    assert env.get(new[0]) == other
+    assert env.get("8.pk$") == b"other software"
+    for f in ("1.pkt", "3.pkt", "4.PKT", "5.pKt", "6.PkT", "7.PKT", "9.pkt", "10.pkt",
+              "11.pkt"):
+        assert env.get(f) == fixed, f
+    assert env.get("7.pkt") == env.get("2.PKT") == packet([pmsg()])
     assert sorted(l for l in env.loglines("warn") if "temporary" in l[1]) == [
-        ("warn", "deleted incomplete temporary file 1.pk$"),
-        ("warn", "deleted incomplete temporary file 2.PK#"),
-        ("warn", "restored 3.pkt from temporary file 3.pk$"),
-        ("warn", "restored 4.PKT from temporary file 4.PK#"),
-        ("warn", "restored 5.pKt from temporary file 5.pK$"),
-        ("warn", "restored 6.PkT from temporary file 6.Pk#"),
-        ("warn", "restored 7.PKT from temporary file 7.PK#")]
+        ("warn", "deleted incomplete temporary file 1.tr$"),
+        ("warn", "deleted incomplete temporary file 2.TR#"),
+        ("warn", "restored 10.pkt from temporary file 10.tr$"),
+        ("warn", "restored 3.pkt from temporary file 3.tr$"),
+        ("warn", "restored 4.PKT from temporary file 4.TR#"),
+        ("warn", "restored 5.pKt from temporary file 5.tR$"),
+        ("warn", "restored 6.PkT from temporary file 6.Tr#"),
+        ("warn", "restored 7.PKT from temporary file 7.TR#"),
+        ("warn", "restored 9.pkt from temporary file 9.tr$"),
+        ("warn", "temporary file 11.tr$ does not match 11.pkt, kept as %s" % new[0])]
     assert ("info", "processed 3.pkt: messages 1, modified 1") in env.loglines()
     env.cleanup()
 
@@ -868,15 +888,117 @@ def temp_file_kept_if_packet_unknown():
     if os.geteuid() == 0:
         return
     env = Env()
-    env.put("1.pk$", packet([pmsg()]))
+    env.put("1.tr$", packet([pmsg()]))
     os.chmod(env.dir, 0o444)  # listed, but stat() fails with EACCES
     r = env.run()
     os.chmod(env.dir, 0o755)
     assert r.returncode == 1
-    assert env.files() == ["1.pk$"]
+    assert env.files() == ["1.tr$"]
     assert env.loglines() == [
-        ("err", "can't stat 1.pkt: Permission denied, temporary file 1.pk$ kept")], \
+        ("err", "can't stat 1.pkt: Permission denied, temporary file 1.tr$ kept")], \
         env.logtext()
+    env.cleanup()
+
+
+@test
+def temp_file_that_cannot_be_checked():
+    """A temporary file that can't be read: kept, and its packet goes to .bad."""
+    env = Env()
+    data = packet([pmsg(to=b"x" * 40)])
+    env.put("1.pkt", data)
+    os.symlink("1.tr$", os.path.join(env.dir, "1.tr$"))  # stat(), fopen(): ELOOP
+    assert env.run().returncode == 1
+    assert env.files() == ["1.bad", "1.tr$"] and env.get("1.bad") == data, env.files()
+    loop = "Too many levels of symbolic links"
+    assert [l for l in env.loglines() if l[0] == "err"] == [
+        ("err", "can't compare temporary file 1.tr$ with 1.pkt: %s, kept" % loop),
+        ("err", "1.pkt: can't stat 1.tr$: %s, renamed to 1.bad" % loop)], env.logtext()
+    env.cleanup()
+
+
+@test
+def temp_file_not_renamed():
+    """A temporary file without its packet that can't be renamed is kept."""
+    if os.geteuid() == 0:
+        return
+    env = Env()
+    data = reference(packet([pmsg(to=b"x" * 40)]))[0]
+    env.put("1.tr$", data)
+    os.chmod(env.dir, 0o555)
+    r = env.run()
+    os.chmod(env.dir, 0o755)
+    assert r.returncode == 1
+    assert env.files() == ["1.tr$"] and env.get("1.tr$") == data
+    assert env.loglines("err") == [
+        ("err", "can't restore 1.pkt from temporary file 1.tr$: Permission denied, "
+                "retried on the next run")], env.logtext()
+    env.cleanup()
+
+
+@test
+def packet_deleted_if_not_rewritten():
+    """If the packet can't be rewritten it is deleted, the next run restores it."""
+    if os.geteuid() == 0:
+        return
+    env = Env()
+    data = packet([pmsg(to=b"x" * 40)])
+    path = env.put("1.pkt", data)
+    os.chmod(path, 0o444)  # can't be opened for writing, can be deleted
+    assert env.run().returncode == 1
+    assert env.files() == ["1.tr$"], env.files()
+    assert env.get("1.tr$") == reference(data)[0]
+    assert [l for l in env.loglines() if l[0] == "err"] == [
+        ("err", "can't write 1.pkt: Permission denied"),
+        ("err", "deleted 1.pkt, it is restored from 1.tr$ on the next run")], env.logtext()
+    os.remove(env.log)
+    assert env.run().returncode == 0
+    assert env.files() == ["1.pkt"] and env.get("1.pkt") == reference(data)[0]
+    assert ("warn", "restored 1.pkt from temporary file 1.tr$") in env.loglines()
+    env.cleanup()
+
+
+@test
+def bad_packets():
+    """A packet that needs changes but can't be changed is renamed to .bad."""
+    env = Env()
+    data = packet([pmsg(to=b"x" * 40)])
+    for n in (1, 2):
+        env.put("%d.pkt" % n, data)
+        os.mkdir(os.path.join(env.dir, "%d.tr$" % n))  # exists, not overwritten
+        env.put(os.path.join("%d.tr$" % n, "keep"), b"")
+    env.put("2.bad", b"older")                         # taken: an unused name
+    env.put("$pktsan$.tmp", b"left by an interrupted run")
+    assert env.run().returncode == 1
+    new = [f for f in env.files() if f not in ("1.bad", "1.tr$", "2.bad", "2.tr$")]
+    assert len(new) == 1 and re.match(r"[0-9a-f]{8}\.bad$", new[0]), env.files()
+    assert env.get("1.bad") == env.get(new[0]) == data
+    assert env.get("2.bad") == b"older"
+    assert sorted(l for l in env.loglines() if l[0] == "err") == [
+        ("err", "1.pkt: temporary file 1.tr$ exists, renamed to 1.bad"),
+        ("err", "2.pkt: temporary file 2.tr$ exists, renamed to %s" % new[0])]
+    assert env.get(os.path.join("1.tr$", "keep")) == b""
+    env.cleanup()
+
+
+@test
+def partial_temp_file_deleted():
+    """A temporary file that can't be written completely is deleted."""
+    import resource
+    import signal
+    env = Env()
+    data = packet([pmsg(to=b"x" * 40, text=b"y" * 8000 + b"\r")])
+    env.put("1.pkt", data)
+
+    def limit():
+        signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+        resource.setrlimit(resource.RLIMIT_FSIZE, (4096, 4096))
+
+    r = subprocess.run([EXE, "-c", env.cfg, env.dir], cwd=env.root, capture_output=True,
+                       preexec_fn=limit)
+    assert r.returncode == 1 and not r.stderr, r.stderr
+    assert env.files() == ["1.bad"] and env.get("1.bad") == data, env.files()
+    assert [l for l in env.loglines() if l[0] == "err"] == [
+        ("err", "1.pkt: can't write 1.tr$: File too large, renamed to 1.bad")], env.logtext()
     env.cleanup()
 
 
@@ -904,9 +1026,10 @@ def read_only_directory():
     assert env.get("1.pkt") == data and env.files() == ["1.pkt", "2.pkt"]
     assert [l for l in env.loglines() if l[0] != "info"] == [
         ("warn", "modifying 1.pkt"),
-        ("warn", "1.pkt: msg 1, area NETMAIL, from Sysop (5020/1) to %s (5030/2), subject "
+        ("warn", "1.pkt#1: area NETMAIL, from Sysop (5020/1) to %s (5030/2), subject "
          "\"Hello\": truncating toUserName 40 -> 35" % ("x" * 35)),
-        ("err", "can't write 1.pk$: Permission denied, 1.pkt skipped")]
+        ("err", "1.pkt: can't write 1.tr$: Permission denied, can't rename it to "
+                "1.bad: Permission denied")]
     assert [l[1] for l in env.loglines("info")] == ["processed 2.pkt: messages 1, modified 0"]
     env.cleanup()
 

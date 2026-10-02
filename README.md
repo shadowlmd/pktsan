@@ -20,17 +20,26 @@ pktsan runs before the tosser and truncates the strings.
   last message) is kept byte for byte.
 - Skips a file that is not a packet: shorter than a packet header (58
   bytes), or followed by neither packed messages nor a packet terminator.
-- DOS version: may skip a packet with more than 8000 strings to truncate.
+- Renames a packet that needs changes but can't be changed (no disk space
+  or memory, or `name.tr$` is left in the way) to `name.bad`, or to an
+  unused `XXXXXXXX.bad` if `name.bad` exists. The DOS version may not have the memory for a packet with more
+  than 8000 strings to truncate.
 
 A packet that needs no changes is not written to. A packet that needs
-changes is written to `name.pk$` (`NAME.PK#` for `NAME.PKT`), then
-`name.pkt` is deleted, `name.pk$` is renamed to `name.pkt` and the original
-file time is restored.
+changes is written to `name.tr$` (`NAME.TR#` for `NAME.PKT`), then
+`name.tr$` is copied over `name.pkt` and deleted, and the original file time
+is restored. If `name.pkt` can't be rewritten, it is deleted, and the next
+run renames `name.tr$` to it.
 
-After an interrupted run, the next run:
+After an interrupted run, the next run handles a left `name.tr$`:
 
-- deletes `name.pk$` if `name.pkt` exists, and processes `name.pkt` again;
-- renames `name.pk$` to `name.pkt` if `name.pkt` does not exist.
+- if `name.pkt` does not exist, renames `name.tr$` to `name.pkt`;
+- otherwise processes `name.pkt` again into `$pktsan$.tmp` and compares
+  the result with `name.tr$`:
+  - the same, or the start of `name.tr$`: copies `name.tr$` over
+    `name.pkt`;
+  - `name.tr$` is the start of it: deletes `name.tr$`;
+  - otherwise renames `name.tr$` to a new packet with an unused name.
 
 ## FastEcho
 
@@ -100,7 +109,7 @@ Lines starting with `;` or `#` are comments. Keywords are case-insensitive.
   problem in a processed packet: cut off message, unparsable data after the
   last message; leftover temporary files.
 - `[err]`: a directory or a file was skipped: not a packet, a read or
-  write error, or not enough memory.
+  write error, or a packet renamed to `.bad`.
 
 File names are logged with the directory as given on the command line.
 A packet name is followed by the originating and destination addresses from
@@ -119,8 +128,8 @@ fields with their lengths in bytes before and after.
 2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\6ab6fb20.pkt (2:50/4 -> 2:5030/1997): messages 1, modified 0
 2026-09-26 19:42:46 [err] c:\ftn\inbound\temp\9abc0123.pkt is not a packet: only 12 bytes, shorter than a packet header, skipped
 2026-09-26 19:42:46 [warn] modifying c:\ftn\inbound\temp\1234abcd.pkt (2:999/999 -> 2:5030/1997)
-2026-09-26 19:42:46 [warn] 1234abcd.pkt: msg 32, area GENERAL.TEST, from Ivan Petrov (999/999) to All, subject "Re: Configuring FastEcho to toss packets from the unpack directory befo": truncating subject 91 -> 71
-2026-09-26 19:42:46 [warn] 1234abcd.pkt: msg 35, area NETMAIL, from Sysop (999/999) to Jean-Claude Camille Francois Van Va (5030/1997), subject "Fan mail": truncating toUserName 42 -> 35
+2026-09-26 19:42:46 [warn] 1234abcd.pkt#32: area GENERAL.TEST, from Ivan Petrov (999/999) to All, subject "Re: Configuring FastEcho to toss packets from the unpack directory befo": truncating subject 91 -> 71
+2026-09-26 19:42:46 [warn] 1234abcd.pkt#35: area NETMAIL, from Sysop (999/999) to Jean-Claude Camille Francois Van Va (5030/1997), subject "Fan mail": truncating toUserName 42 -> 35
 2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\1234abcd.pkt (2:999/999 -> 2:5030/1997): messages 40, modified 2
 ```
 
