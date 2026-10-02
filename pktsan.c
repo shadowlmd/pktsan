@@ -87,6 +87,17 @@ typedef struct
     char Text[LINE_SIZE];    /* start of the text */
 } Msg;
 
+/* The names for one file in a directory, in one block (see NewFiles()) */
+typedef struct
+{
+    char * Pkt;    /* dir/name.pkt */
+    char * Tmp;    /* dir/name.tr$ */
+    char * Bad;    /* dir/name.bad */
+    char * New;    /* dir/XXXXXXXX.ext, an unused name */
+    char * Name;   /* Pkt with the packet addresses, for the log */
+    char * Why;    /* why the packet goes to .bad, for the log */
+} Files;
+
 /* The result of ScanPacket() */
 typedef struct
 {
@@ -138,6 +149,28 @@ static void Log(int Level, const char * Fmt, ...)
 }
 
 /*
+ * Allocates Size bytes. Without memory even for file names nothing can be
+ * done, so the program stops.
+ */
+static void * AllocOrDie(size_t Size)
+{
+    void * p = malloc(Size);
+
+    if(p == NULL)
+    {
+        Log(LOG_ERR, "not enough memory, stopped");
+        exit(1);
+    }
+
+    return p;
+}
+
+static char * StrDupOrDie(const char * s)
+{
+    return strcpy((char *)AllocOrDie(strlen(s) + 1), s);
+}
+
+/*
  * Logs Value of What that the code does not handle (a bug), handled as the
  * known value As. Keeps errno.
  */
@@ -145,24 +178,6 @@ static void Unexpected(const char * What, int Value, int As)
 {
     Log(LOG_ERR, "bug found, please report it: unexpected %s %d, handled "
         "as %d", What, Value, As);
-}
-
-static void * Alloc(size_t Size)
-{
-    void * p = malloc(Size);
-
-    if(p == NULL)
-    {
-        fprintf(stderr, PROGNAME ": out of memory\n");
-        exit(1);
-    }
-
-    return p;
-}
-
-static char * StrDup(const char * s)
-{
-    return strcpy((char *)Alloc(strlen(s) + 1), s);
 }
 
 /*
@@ -180,15 +195,15 @@ static void * Grow(void * P, long N, size_t Size)
 }
 
 /*
- * "name.pkt" <-> "name.tr$", "NAME.PKT" <-> "NAME.TR#": the extension of a
- * packet <-> of its temporary file, letter by letter in the same case
+ * "name.pkt" <-> "name.tr$", "NAME.PKT" <-> "NAME.TR#", in place: the
+ * extension of a packet <-> of its temporary file, letter by letter in the
+ * same case
  */
-static char * SwapExt(const char * Name)
+static void SwapExt(char * Name)
 {
     /* each letter and its pair two places away: p <-> t, P <-> T, ... */
     static const char * Swap[3] = { "pPtT", "kKrR", "tT$#" };
-    char * s = StrDup(Name);
-    char * e = s + strlen(s) - 3;
+    char * e = Name + strlen(Name) - 3;
     int i;
 
     for(i = 0; i < 3; i++)
@@ -200,8 +215,6 @@ static char * SwapExt(const char * Name)
             e[i] = Swap[i][(q - Swap[i]) ^ 2];
         }
     }
-
-    return s;
 }
 
 /* A directory separator: '/', and DIRSEP ('\\' except on Unix) */
@@ -210,23 +223,24 @@ static int IsSep(char c)
     return c == '/' || c == DIRSEP;
 }
 
-/* Dir + separator + Name; the separator follows the style of Dir */
-static char * JoinPath(const char * Dir, const char * Name)
+/*
+ * Out = Dir + separator + Name; the separator follows the style of Dir.
+ * Out has room for strlen(Dir) + strlen(Name) + 2 bytes.
+ */
+static void JoinPath(char * Out, const char * Dir, const char * Name)
 {
     size_t l = strlen(Dir);
     char Sep = (strchr(Dir, '/') != NULL && strchr(Dir, DIRSEP) == NULL) ?
                '/' : DIRSEP;
-    char * p = (char *)Alloc(l + 1 + strlen(Name) + 1);
 
-    strcpy(p, Dir);
+    strcpy(Out, Dir);
 
     if(l > 0 && !IsSep(Dir[l - 1]) && !(DRIVES && Dir[l - 1] == ':'))
     {
-        p[l++] = Sep;
+        Out[l++] = Sep;
     }
 
-    strcpy(p + l, Name);
-    return p;
+    strcpy(Out + l, Name);
 }
 
 static int HasExt(const char * Name, const char * Ext)
@@ -252,16 +266,16 @@ static const char * BaseName(const char * Path)
     return p;
 }
 
-/* Name in the directory of Path: "dir/file" + Name -> "dir/Name" */
-static char * SameDir(const char * Path, const char * Name)
+/*
+ * Out = Name in the directory of Path: "dir/file" + Name -> "dir/Name".
+ * Out has room for strlen(Path) + strlen(Name) + 1 bytes.
+ */
+static void SameDir(char * Out, const char * Path, const char * Name)
 {
     size_t l = (size_t)(BaseName(Path) - Path);
-    char * p;
 
-    p = (char *)Alloc(l + strlen(Name) + 1);
-    memcpy(p, Path, l);
-    strcpy(p + l, Name);
-    return p;
+    memcpy(Out, Path, l);
+    strcpy(Out + l, Name);
 }
 
 static int IsAbsolute(const char * Path)
@@ -284,7 +298,10 @@ static char * Trim(char * s)
     return s;
 }
 
-/* Returns 0 on success. A missing config is fine unless Required. */
+/*
+ * Returns 0 on success. A missing config is fine unless Required. LogFile
+ * is set (allocated) if the config has it.
+ */
 static int ReadConfig(const char * Path, int Required, char ** LogFile)
 {
     FILE * fh;
@@ -340,7 +357,16 @@ static int ReadConfig(const char * Path, int Required, char ** LogFile)
         {
             /* a relative log path is relative to the config */
             free(*LogFile);
-            *LogFile = IsAbsolute(Val) ? StrDup(Val) : SameDir(Path, Val);
+
+            if(IsAbsolute(Val))
+            {
+                *LogFile = StrDupOrDie(Val);
+            }
+            else
+            {
+                *LogFile = (char *)AllocOrDie(strlen(Path) + strlen(Val) + 1);
+                SameDir(*LogFile, Path, Val);
+            }
         }
         else if(stricmp(Key, "LogLevel") == 0 && stricmp(Val, "info") == 0)
         {
@@ -397,16 +423,16 @@ static char * FormatAddr(char * p, int Zone, int Net, int Node, int Point)
 }
 
 /*
- * Path + " (orig -> dest)" from packet header Hdr: type 2+ (FSC-0039,
+ * Out = Path + " (orig -> dest)" from packet header Hdr: type 2+ (FSC-0039,
  * FSC-0048), type 2.2 (FSC-0045) or type 2 (FTS-0001, zones from QMail).
+ * An address takes up to 27 characters, Out has room for strlen(Path) + 64.
  */
-static char * PktName(const char * Path, const unsigned char * Hdr)
+static void PktName(char * Out, const char * Path, const unsigned char * Hdr)
 {
     int      OZone = SWord(Hdr + 34), DZone = SWord(Hdr + 36);
     int      ONet  = SWord(Hdr + 20), DNet  = SWord(Hdr + 22);
     int      OPt   = 0,               DPt   = 0;
     unsigned Cw    = Word(Hdr + 44),  CwCopy = Word(Hdr + 40);
-    char * s = (char *)Alloc(strlen(Path) + 64);
     char * p;
 
     if((Cw & 1) != 0 && Cw == (((CwCopy & 0xFF) << 8) | (CwCopy >> 8)))
@@ -431,12 +457,11 @@ static char * PktName(const char * Path, const unsigned char * Hdr)
         DPt = SWord(Hdr + 6);
     }
 
-    p  = s + sprintf(s, "%s (", Path);
+    p  = Out + sprintf(Out, "%s (", Path);
     p  = FormatAddr(p, OZone, ONet, SWord(Hdr + 0), OPt);
     p += sprintf(p, " -> ");
     p  = FormatAddr(p, DZone, DNet, SWord(Hdr + 2), DPt);
     strcpy(p, ")");
-    return s;
 }
 
 /* Control characters -> '?' */
@@ -505,11 +530,10 @@ static void LogMsg(const char * Path, long N, Msg * M)
 /*
  * Reads the packet and finds the strings to truncate. A message cut off by
  * the end of the file is counted too, and its complete strings are
- * truncated; the start of such a message is the Tail. If Path is not
- * NULL, logs each modified message, and the packet Path before the first
- * one.
+ * truncated; the start of such a message is the Tail. If F is not NULL,
+ * logs each modified message, and the packet before the first one.
  */
-static void ScanPacket(FILE * fh, const char * Path, Scan * S)
+static void ScanPacket(FILE * fh, const Files * F, Scan * S)
 {
     static Msg M;
     long pos = 0, Cut = 0;
@@ -611,17 +635,15 @@ static void ScanPacket(FILE * fh, const char * Path, Scan * S)
 
         if(S->TrCount > First && !S->NoMem)
         {
-            if(++S->Mod == 1 && Path != NULL)
+            if(++S->Mod == 1 && F != NULL)
             {
-                char * Name = PktName(Path, S->Hdr);
-
-                Log(LOG_WARN, "modifying %s", Name);
-                free(Name);
+                PktName(F->Name, F->Pkt, S->Hdr);
+                Log(LOG_WARN, "modifying %s", F->Name);
             }
 
-            if(Path != NULL)
+            if(F != NULL)
             {
-                LogMsg(Path, S->Msgs, &M);
+                LogMsg(F->Pkt, S->Msgs, &M);
             }
         }
 
@@ -799,10 +821,11 @@ static int Exists(const char * Path)
 }
 
 /*
- * An unused name with extension Ext in the directory of file Path:
- * "XXXXXXXX.ext" (allocated, with the directory), NULL if none is found
+ * Out = an unused name with extension Ext (4 characters) in the directory
+ * of file Path: "XXXXXXXX.ext" with the directory. Out has room for
+ * strlen(Path) + 13 bytes. Returns 0 if none is found.
  */
-static char * UniqueName(const char * Path, const char * Ext)
+static int UniqueName(char * Out, const char * Path, const char * Ext)
 {
     unsigned long n = (unsigned long)time(NULL);
     char Name[16];
@@ -810,44 +833,39 @@ static char * UniqueName(const char * Path, const char * Ext)
 
     for(i = 0; i < 1000; i++)
     {
-        char * New;
-
         sprintf(Name, "%08lx%s", (n + i) & 0xFFFFFFFFUL, Ext);
-        New = SameDir(Path, Name);
+        SameDir(Out, Path, Name);
 
-        if(Exists(New) == 0)
+        if(Exists(Out) == 0)
         {
-            return New;
+            return 1;
         }
-
-        free(New);
     }
 
-    return NULL;
+    return 0;
 }
 
 /*
- * Renames packet Path that needs changes but can't be changed to name.bad,
+ * Renames packet F->Pkt that needs changes but can't be changed to F->Bad,
  * or to an unused .bad name if that one exists, so that the tosser does not
- * get it, and logs it as an error: Why for packet Name.
+ * get it, and logs it as an error: F->Why for the packet F->Name.
  */
-static void BadPkt(const char * Path, const char * Name, const char * Why)
+static void BadPkt(const Files * F)
 {
-    char * Bad = StrDup(Path);
-
-    strcpy(Bad + strlen(Bad) - 4, ".bad");
+    const char * Bad = F->Bad;
+    const char * Name = F->Name;
+    const char * Why = F->Why;
 
     if(Exists(Bad) != 0)
     {
-        free(Bad);
-        Bad = UniqueName(Path, ".bad");
+        Bad = UniqueName(F->New, F->Pkt, ".bad") ? F->New : NULL;
     }
 
     if(Bad == NULL)
     {
         Log(LOG_ERR, "%s: %s, no unused .bad name found for it", Name, Why);
     }
-    else if(rename(Path, Bad) == 0)
+    else if(rename(F->Pkt, Bad) == 0)
     {
         Log(LOG_ERR, "%s: %s, renamed to %s", Name, Why, Bad);
     }
@@ -856,19 +874,19 @@ static void BadPkt(const char * Path, const char * Name, const char * Why)
         Log(LOG_ERR, "%s: %s, can't rename it to %s: %s", Name, Why, Bad,
             strerror(errno));
     }
-
-    free(Bad);
 }
 
 /*
- * Writes the truncated packet Path to Tmp, copies Tmp over Path, restores
- * the file time from st and deletes Tmp. Name is Path for the log. If Tmp
- * exists (e.g. kept by RestoreTmp()) or can't be written, Path is renamed to
- * .bad. Returns 0 on error.
+ * Writes the truncated packet F->Pkt to F->Tmp, copies it over F->Pkt,
+ * restores the file time from st and deletes F->Tmp. If F->Tmp exists (e.g.
+ * kept by RestoreTmp()) or can't be written, the packet is renamed to .bad.
+ * Returns 0 on error.
  */
-static int ReplacePkt(const char * Path, const char * Tmp, const char * Name,
-                      const Scan * S, const struct stat * st)
+static int ReplacePkt(const Files * F, const Scan * S, const struct stat * st)
 {
+    const char * Path = F->Pkt;
+    const char * Tmp = F->Tmp;
+    const char * Name = F->Name;
     struct utimbuf ut;
     const char * Fmt = NULL;
     const char * Err = "";
@@ -879,7 +897,7 @@ static int ReplacePkt(const char * Path, const char * Tmp, const char * Name,
     {
         if(!WritePkt(Path, Tmp, S))
         {
-            Fmt = "can't write %s: %s";
+            Fmt = "can't write %s: %.200s";
             Err = errno ? strerror(errno) : "read or write error";
         }
     }
@@ -896,17 +914,14 @@ static int ReplacePkt(const char * Path, const char * Tmp, const char * Name,
             Unexpected("Exists() result", e, -1);
         }
 
-        Fmt = "can't stat %s: %s";
+        Fmt = "can't stat %s: %.200s";
         Err = strerror(errno);
     }
 
     if(Fmt != NULL)
     {
-        char * Why = (char *)Alloc(strlen(Tmp) + strlen(Err) + 32);
-
-        sprintf(Why, Fmt, Tmp, Err);
-        BadPkt(Path, Name, Why);
-        free(Why);
+        sprintf(F->Why, Fmt, Tmp, Err);
+        BadPkt(F);
         return 0;
     }
 
@@ -933,15 +948,16 @@ static int ReplacePkt(const char * Path, const char * Tmp, const char * Name,
     return 1;
 }
 
-/* Path and Tmp include the directory. Returns 0 on success, 1 on error. */
-static int ProcessPacket(const char * Path, const char * Tmp)
+/* Processes packet F->Pkt. Returns 0 on success, 1 on error. */
+static int ProcessPacket(const Files * F)
 {
+    const char * Path = F->Pkt;
+    const char * Name = F->Name;
     struct stat st;
     FILE * fh;
     Scan S;
     long Rest;
     int Bad;
-    char * Name = NULL;   /* Path with the addresses, once the header is read */
     int Rc = 1;
 
     S.Tr = NULL;
@@ -962,7 +978,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 
     errno = 0; /* fopen() may set it even on success */
 
-    ScanPacket(fh, Path, &S);
+    ScanPacket(fh, F, &S);
     Bad = ferror(fh);
     fclose(fh);
 
@@ -980,16 +996,14 @@ static int ProcessPacket(const char * Path, const char * Tmp)
         goto done;
     }
 
-    Name = PktName(Path, S.Hdr);
+    PktName(F->Name, Path, S.Hdr);
     Rest = S.Size - S.Tail;
 
     if(S.NoMem)
     {
-        char Why[80];
-
-        sprintf(Why, "not enough memory to truncate more than %ld strings",
+        sprintf(F->Why, "not enough memory to truncate more than %ld strings",
                 S.TrCount);
-        BadPkt(Path, Name, Why);
+        BadPkt(F);
         goto done;
     }
 
@@ -1033,7 +1047,7 @@ static int ProcessPacket(const char * Path, const char * Tmp)
             "parsing", Name, S.Msgs, Rest, S.Tail);
     }
 
-    if(S.TrCount > 0 && !ReplacePkt(Path, Tmp, Name, &S, &st))
+    if(S.TrCount > 0 && !ReplacePkt(F, &S, &st))
     {
         goto done;
     }
@@ -1044,7 +1058,6 @@ static int ProcessPacket(const char * Path, const char * Tmp)
 
 done:
     free(S.Tr);
-    free(Name);
     return Rc;
 }
 
@@ -1090,7 +1103,7 @@ static int CompareFiles(const char * A, const char * B)
     return Rc;
 }
 
-/* Writes packet Path processed again to Out, not logged. Returns 0 on error. */
+/* Writes packet Path processed again to Out, not logged. 0 on error. */
 static int Reprocess(const char * Path, const char * Out)
 {
     FILE * fh = fopen(Path, "rb");
@@ -1112,7 +1125,8 @@ static int Reprocess(const char * Path, const char * Out)
 
 /*
  * Compares temporary file PTmp with its packet PPkt processed again to
- * $pktsan$.tmp in Dir:
+ * PChk ($pktsan$.tmp); PNew has room for an unused packet name (see
+ * UniqueName()):
  *   - the same, or the start of PTmp: the packet was being rewritten, PTmp
  *     is copied over it;
  *   - PTmp is the start of it: PTmp was being written, it is deleted;
@@ -1121,10 +1135,9 @@ static int Reprocess(const char * Path, const char * Out)
  *   - they can't be compared: PTmp is kept.
  * Returns 0 on success, 1 on error.
  */
-static int CompareTmp(const char * Dir, const char * PTmp, const char * PPkt)
+static int CompareTmp(const char * PTmp, const char * PPkt,
+                      const char * PChk, char * PNew)
 {
-    char * PChk = JoinPath(Dir, "$pktsan$.tmp");
-    char * PNew = NULL;
     int Cmp;
     int Rc = 1;
 
@@ -1167,7 +1180,7 @@ static int CompareTmp(const char * Dir, const char * PTmp, const char * PPkt)
     else if(Cmp == 3)
     {
         /* No unused packet name is found */
-        if((PNew = UniqueName(PTmp, ".pkt")) == NULL)
+        if(!UniqueName(PNew, PTmp, ".pkt"))
         {
             Log(LOG_ERR, "temporary file %s does not match %s and no unused "
                 "packet name is found for it, kept", PTmp, PPkt);
@@ -1196,25 +1209,23 @@ static int CompareTmp(const char * Dir, const char * PTmp, const char * PPkt)
         }
 
         Log(LOG_ERR, "can't compare temporary file %s with %s: %s, kept",
-            PTmp, PPkt, errno ? strerror(errno) : "read or write error");
+            PTmp, PPkt,
+            errno ? strerror(errno) : "read, write or memory error");
     }
 
     remove(PChk);
-    free(PChk);
-    free(PNew);
     return Rc;
 }
 
 /*
- * Handles temporary file Name in Dir left by an interrupted run. Without
- * its packet it is renamed to the packet, otherwise see CompareTmp().
- * Returns 0 on success, 1 on error.
+ * Handles temporary file F->Tmp left by an interrupted run. Without its
+ * packet it is renamed to the packet, otherwise see CompareTmp(). Returns 0
+ * on success, 1 on error.
  */
-static int RestoreTmp(const char * Dir, const char * Name)
+static int RestoreTmp(const Files * F, const char * PChk)
 {
-    char * Pkt  = SwapExt(Name);
-    char * PTmp = JoinPath(Dir, Name);
-    char * PPkt = JoinPath(Dir, Pkt);
+    const char * PTmp = F->Tmp;
+    const char * PPkt = F->Pkt;
     int e = Exists(PPkt);
     int Rc = 1;
 
@@ -1235,7 +1246,7 @@ static int RestoreTmp(const char * Dir, const char * Name)
     /* The packet exists: it is processed again and compared */
     else if(e == 1)
     {
-        Rc = CompareTmp(Dir, PTmp, PPkt);
+        Rc = CompareTmp(PTmp, PPkt, PChk, F->New);
     }
     /* Unknown if the packet exists (-1), or an unexpected result: rename()
        could replace a packet that does exist, the temporary file is kept */
@@ -1250,24 +1261,44 @@ static int RestoreTmp(const char * Dir, const char * Name)
             strerror(errno), PTmp);
     }
 
-    free(Pkt);
-    free(PTmp);
-    free(PPkt);
     return Rc;
 }
 
 /*
- * Name in Dir is not a directory or another special file. If stat() fails,
- * it counts as a file: processing it logs the error.
+ * Fills F for file Name in Dir: the packet if Tmp is 0, its temporary file
+ * otherwise. All the names are in one block, freed with free(F->Pkt).
  */
-static int IsFile(const char * Dir, const char * Name)
+static void NewFiles(Files * F, const char * Dir, const char * Name, int Tmp)
 {
-    char * Path = JoinPath(Dir, Name);
-    struct stat st;
-    int Rc = stat(Path, &st) != 0 || S_ISREG(st.st_mode);
+    size_t l = strlen(Dir) + strlen(Name) + 2; /* a path in Dir, null too */
+    char * Own;
+    char * Pair;
 
-    free(Path);
-    return Rc;
+    F->Pkt  = (char *)AllocOrDie(6 * l + 336);
+    F->Tmp  = F->Pkt + l;
+    F->Bad  = F->Tmp + l;
+    F->New  = F->Bad + l;           /* XXXXXXXX.ext: up to l + 13 */
+    F->Name = F->New + l + 16;      /* the packet addresses: up to 64 */
+    F->Why  = F->Name + l + 64;     /* a path, up to 256 more */
+
+    Own  = Tmp ? F->Tmp : F->Pkt;   /* the file from the listing */
+    Pair = Tmp ? F->Pkt : F->Tmp;
+    JoinPath(Own, Dir, Name);
+    strcpy(Pair, Own);
+    SwapExt(Pair);
+    strcpy(F->Bad, F->Pkt);
+    strcpy(F->Bad + strlen(F->Bad) - 4, ".bad");
+}
+
+/*
+ * Path is not a directory or another special file. If stat() fails, it
+ * counts as a file: processing it logs the error.
+ */
+static int IsFile(const char * Path)
+{
+    struct stat st;
+
+    return stat(Path, &st) != 0 || S_ISREG(st.st_mode);
 }
 
 /*
@@ -1282,6 +1313,7 @@ static int ProcessDir(const char * Dir)
     int Errors = 0;
     DIR * d;
     struct dirent * de;
+    Files F;
 
     Log(LOG_INFO, "processing directory %s", Dir);
     d = opendir(Dir);
@@ -1293,16 +1325,22 @@ static int ProcessDir(const char * Dir)
     }
 
     /* left if a run was interrupted while handling a temporary file */
-    Chk = JoinPath(Dir, "$pktsan$.tmp");
+    Chk = (char *)AllocOrDie(strlen(Dir) + 14);
+    JoinPath(Chk, Dir, "$pktsan$.tmp");
     remove(Chk);
-    free(Chk);
 
     while((de = readdir(d)) != NULL)
     {
-        if((HasExt(de->d_name, ".tr$") || HasExt(de->d_name, ".tr#")) &&
-           IsFile(Dir, de->d_name))
+        if(HasExt(de->d_name, ".tr$") || HasExt(de->d_name, ".tr#"))
         {
-            Errors += RestoreTmp(Dir, de->d_name);
+            NewFiles(&F, Dir, de->d_name, 1);
+
+            if(IsFile(F.Tmp))
+            {
+                Errors += RestoreTmp(&F, Chk);
+            }
+
+            free(F.Pkt);
         }
     }
 
@@ -1312,25 +1350,27 @@ static int ProcessDir(const char * Dir)
     if(d == NULL)
     {
         Log(LOG_ERR, "can't read directory %s: %s", Dir, strerror(errno));
+        free(Chk);
         return Errors + 1;
     }
 
     while((de = readdir(d)) != NULL)
     {
-        if(HasExt(de->d_name, ".pkt") && IsFile(Dir, de->d_name))
+        if(HasExt(de->d_name, ".pkt"))
         {
-            char * Tmp  = SwapExt(de->d_name);
-            char * PPkt = JoinPath(Dir, de->d_name);
-            char * PTmp = JoinPath(Dir, Tmp);
+            NewFiles(&F, Dir, de->d_name, 0);
 
-            Errors += ProcessPacket(PPkt, PTmp);
-            free(PPkt);
-            free(PTmp);
-            free(Tmp);
+            if(IsFile(F.Pkt))
+            {
+                Errors += ProcessPacket(&F);
+            }
+
+            free(F.Pkt);
         }
     }
 
     closedir(d);
+    free(Chk);
     return Errors;
 }
 
@@ -1347,9 +1387,9 @@ static void Usage(FILE * fh)
 
 int main(int argc, char ** argv)
 {
-    char * Cfg = NULL;
+    char * DefCfg = NULL;
     char * LogFile = NULL;
-    int CfgRequired = 0;
+    const char * Cfg = NULL;
     int Errors = 0;
     int c, i;
 
@@ -1358,25 +1398,20 @@ int main(int argc, char ** argv)
         switch(c)
         {
             case 'c':
-                free(Cfg);
-                Cfg = StrDup(optarg);
-                CfgRequired = 1;
+                Cfg = optarg;
                 break;
 
             case 'h':
-                free(Cfg);
                 Usage(stdout);
                 return 0;
 
             default: /* getopt() has printed the error */
-                free(Cfg);
                 return 1;
         }
     }
 
     if(optind >= argc)
     {
-        free(Cfg);
         Usage(stderr);
         return 1;
     }
@@ -1384,12 +1419,13 @@ int main(int argc, char ** argv)
     if(Cfg == NULL)
     {
         /* CONFIGNAME in the directory of the program */
-        Cfg = SameDir(argv[0], CONFIGNAME);
+        DefCfg = (char *)AllocOrDie(strlen(argv[0]) + sizeof(CONFIGNAME));
+        SameDir(DefCfg, argv[0], CONFIGNAME);
     }
 
-    if(ReadConfig(Cfg, CfgRequired, &LogFile) != 0)
+    if(ReadConfig(Cfg != NULL ? Cfg : DefCfg, Cfg != NULL, &LogFile) != 0)
     {
-        free(Cfg);
+        free(DefCfg);
         free(LogFile);
         return 1;
     }
@@ -1402,7 +1438,7 @@ int main(int argc, char ** argv)
         {
             fprintf(stderr, PROGNAME ": can't open log '%s': %s\n", LogFile,
                     strerror(errno));
-            free(Cfg);
+            free(DefCfg);
             free(LogFile);
             return 1;
         }
@@ -1418,7 +1454,7 @@ int main(int argc, char ** argv)
         fclose(LogFh);
     }
 
-    free(Cfg);
+    free(DefCfg);
     free(LogFile);
     return Errors ? 1 : 0;
 }

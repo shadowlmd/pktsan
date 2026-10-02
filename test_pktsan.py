@@ -693,6 +693,31 @@ def packets_rewritten_in_place():
 
 
 @test
+def long_paths():
+    """A path too long for the system (4096 on Linux) is an error from it."""
+    env = Env()
+    data = packet([pmsg(to=b"x" * 40)])
+    long_pkt = "y" * 100 + ".pkt"
+    long_tmp = "z" * 100 + ".tr$"
+    env.put("1.pkt", data)
+    env.put(long_pkt, data)
+    env.put(long_tmp, data)
+    d = "./" * 1999 + "in"  # 4000 characters
+    assert env.run(dirs=[d], cwd=env.root).returncode == 1
+    errs = [l.split("] ", 1)[1] for l in env.logsplit() if "[err]" in l]
+    assert errs == [
+        "can't stat %s/%s.pkt: File name too long, temporary file %s/%s kept"
+        % (d, long_tmp[:-4], d, long_tmp),
+        "can't stat %s/%s: File name too long, skipped" % (d, long_pkt)], \
+        [e[-120:] for e in errs]
+    assert any("] processed %s/1.pkt (" % d in l and l.endswith(": messages 1, modified 1")
+               for l in env.logsplit())
+    assert env.get("1.pkt") == reference(data)[0]
+    assert env.get(long_pkt) == env.get(long_tmp) == data
+    env.cleanup()
+
+
+@test
 def unix_path_rules():
     """On Unix only '/' separates directories and there are no drives."""
     env = Env()

@@ -135,8 +135,8 @@ fields with their lengths in bytes before and after.
 
 ## Building
 
-One C file; needs the standard C library, `dirent.h`, `utime()`,
-`getcwd()` and `getopt()`.
+One C file; needs the standard C library, `dirent.h`, `utime()` and
+`getopt()`.
 
 ```
 gcc -O2 -static-libgcc -o pktsan.exe pktsan.c     (MinGW, Win32)
