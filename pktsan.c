@@ -36,10 +36,18 @@
 #include <utime.h>
 #include <unistd.h>
 
-/* MinGW, Watcom, Borland, DJGPP and EMX have stricmp(), Unix strcasecmp() */
+/*
+ * MinGW, Watcom, Borland, DJGPP and EMX have stricmp(), Unix strcasecmp().
+ * DIRSEP is the default directory separator, DRIVES says if "c:" exists.
+ */
 #if defined(__unix__) || defined(__APPLE__)
 #include <strings.h>
 #define stricmp strcasecmp
+#define DIRSEP  '/'
+#define DRIVES  0
+#else
+#define DIRSEP  '\\'
+#define DRIVES  1
 #endif
 
 #define PROGNAME    "pktsan"
@@ -176,17 +184,23 @@ static char * SwapExt(const char * Name)
     return s;
 }
 
+/* A directory separator: '/', and DIRSEP ('\\' except on Unix) */
+static int IsSep(char c)
+{
+    return c == '/' || c == DIRSEP;
+}
+
 /* Dir + separator + Name; the separator follows the style of Dir */
 static char * JoinPath(const char * Dir, const char * Name)
 {
     size_t l = strlen(Dir);
-    char Sep = (strchr(Dir, '\\') != NULL && strchr(Dir, '/') == NULL) ?
-               '\\' : '/';
+    char Sep = (strchr(Dir, '/') != NULL && strchr(Dir, DIRSEP) == NULL) ?
+               '/' : DIRSEP;
     char * p = (char *)Alloc(l + 1 + strlen(Name) + 1);
 
     strcpy(p, Dir);
 
-    if(l > 0 && Dir[l - 1] != Sep && Dir[l - 1] != ':')
+    if(l > 0 && !IsSep(Dir[l - 1]) && !(DRIVES && Dir[l - 1] == ':'))
     {
         p[l++] = Sep;
     }
@@ -210,7 +224,7 @@ static const char * BaseName(const char * Path)
 {
     const char * p = Path + strlen(Path);
 
-    while(p > Path && p[-1] != '/' && p[-1] != '\\' && p[-1] != ':')
+    while(p > Path && !IsSep(p[-1]) && !(DRIVES && p[-1] == ':'))
     {
         p--;
     }
@@ -232,8 +246,7 @@ static char * SameDir(const char * Path, const char * Name)
 
 static int IsAbsolute(const char * Path)
 {
-    return Path[0] == '/' || Path[0] == '\\' ||
-           (Path[0] != '\0' && Path[1] == ':');
+    return IsSep(Path[0]) || (DRIVES && Path[0] != '\0' && Path[1] == ':');
 }
 
 static char * Trim(char * s)
@@ -855,7 +868,7 @@ static int HasName(char ** List, long Count, const char * Name)
 
     for(i = 0; i < Count; i++)
     {
-        if(stricmp(List[i], Name) == 0)
+        if(strcmp(List[i], Name) == 0)
         {
             return 1;
         }

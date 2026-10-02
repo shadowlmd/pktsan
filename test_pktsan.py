@@ -673,6 +673,32 @@ def relative_directory():
 
 
 @test
+def unix_path_rules():
+    """On Unix only '/' separates directories and there are no drives."""
+    env = Env()
+    data = packet([pmsg(to=b"x" * 40)])
+    for d in ("c:", "a\\b", "x:y"):
+        os.mkdir(os.path.join(env.root, d))
+        with open(os.path.join(env.root, d, "1.pkt"), "wb") as f:
+            f.write(data)
+        if os.path.exists(env.log):
+            os.remove(env.log)
+        assert env.run(dirs=[d], cwd=env.root).returncode == 0, d
+        text = env.logtext()
+        assert "processed %s/1.pkt (" % d in text, (d, text)
+        assert "] 1.pkt: msg 1, area NETMAIL" in text, (d, text)
+        with open(os.path.join(env.root, d, "1.pkt"), "rb") as f:
+            assert f.read() == reference(data)[0], d
+    # a relative log path with ':' is relative to the config
+    with open(env.cfg, "w") as f:
+        f.write("LogFile c:log\n")
+    env.put("2.pkt", packet([pmsg()]))
+    assert env.run().returncode == 0
+    assert os.path.exists(os.path.join(env.root, "c:log"))
+    env.cleanup()
+
+
+@test
 def log_appends():
     env = Env()
     env.put("1.pkt", packet([pmsg()]))
@@ -798,17 +824,22 @@ def temp_files_from_interrupted_run():
     env.put("4.PK#", data)               # in the same case
     env.put("5.pK$", data)
     env.put("6.Pk#", data)
+    env.put("7.pkt", packet([pmsg()]))  # another packet, not 7.PKT
+    env.put("7.PK#", data)
     assert env.run().returncode == 0
-    assert env.files() == ["1.pkt", "2.PKT", "3.pkt", "4.PKT", "5.pKt", "6.PkT"], env.files()
+    assert env.files() == ["1.pkt", "2.PKT", "3.pkt", "4.PKT", "5.pKt", "6.PkT", "7.PKT",
+                           "7.pkt"], env.files()
     assert env.get("1.pkt") == env.get("3.pkt") == env.get("4.PKT") == env.get("5.pKt") == \
-        env.get("6.PkT") == reference(data)[0]
+        env.get("6.PkT") == env.get("7.PKT") == reference(data)[0]
+    assert env.get("7.pkt") == packet([pmsg()])
     assert sorted(l for l in env.loglines("warn") if "temporary" in l[1]) == [
         ("warn", "deleted incomplete temporary file 1.pk$"),
         ("warn", "deleted incomplete temporary file 2.PK#"),
         ("warn", "restored 3.pkt from temporary file 3.pk$"),
         ("warn", "restored 4.PKT from temporary file 4.PK#"),
         ("warn", "restored 5.pKt from temporary file 5.pK$"),
-        ("warn", "restored 6.PkT from temporary file 6.Pk#")]
+        ("warn", "restored 6.PkT from temporary file 6.Pk#"),
+        ("warn", "restored 7.PKT from temporary file 7.PK#")]
     assert ("info", "processed 3.pkt: messages 1, modified 1") in env.loglines()
     env.cleanup()
 
