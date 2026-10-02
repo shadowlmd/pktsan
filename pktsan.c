@@ -143,8 +143,8 @@ static void Log(int Level, const char * Fmt, ...)
  */
 static void Unexpected(const char * What, int Value, int As)
 {
-    Log(LOG_ERR, "internal error: unexpected %s %d, handled as %d", What,
-        Value, As);
+    Log(LOG_ERR, "bug found, please report it: unexpected %s %d, handled "
+        "as %d", What, Value, As);
 }
 
 static void * Alloc(size_t Size)
@@ -1116,7 +1116,9 @@ static int Reprocess(const char * Path, const char * Out)
  *   - the same, or the start of PTmp: the packet was being rewritten, PTmp
  *     is copied over it;
  *   - PTmp is the start of it: PTmp was being written, it is deleted;
- *   - else PTmp is kept as a packet with an unused name.
+ *   - neither is the start of the other: PTmp is kept as a packet with an
+ *     unused name;
+ *   - they can't be compared: PTmp is kept.
  * Returns 0 on success, 1 on error.
  */
 static int CompareTmp(const char * Dir, const char * PTmp, const char * PPkt)

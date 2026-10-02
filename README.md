@@ -22,8 +22,8 @@ pktsan runs before the tosser and truncates the strings.
   bytes), or followed by neither packed messages nor a packet terminator.
 - Renames a packet that needs changes but can't be changed (no disk space
   or memory, or `name.tr$` is left in the way) to `name.bad`, or to an
-  unused `XXXXXXXX.bad` if `name.bad` exists. The DOS version may not have the memory for a packet with more
-  than 8000 strings to truncate.
+  unused `XXXXXXXX.bad` if `name.bad` exists. The DOS version may not have
+  the memory for a packet with more than 8000 strings to truncate.
 
 A packet that needs no changes is not written to. A packet that needs
 changes is written to `name.tr$` (`NAME.TR#` for `NAME.PKT`), then

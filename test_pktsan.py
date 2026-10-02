@@ -176,7 +176,7 @@ class Env:
             print("   ", cmd, r.returncode, r.stdout, r.stderr)
         if b"Sanitizer" in r.stderr or b"runtime error" in r.stderr:
             raise AssertionError("sanitizer: " + r.stderr.decode(errors="replace"))
-        if "internal error" in self.logtext() or b"internal error" in r.stdout:
+        if "bug found" in self.logtext() or b"bug found" in r.stdout:
             raise AssertionError("pktsan: " + self.logtext() + r.stdout.decode(errors="replace"))
         return r
 
