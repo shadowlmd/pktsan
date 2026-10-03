@@ -259,8 +259,8 @@ def check_packet(env, name, data, r=None):
     mod = len(set(m for m, _, _ in tr))
     texts = [l[1] for l in lines]
     # the packet, then its modified messages, all together
-    block = (["modifying %s" % name] + msg_lines(tr, info, name)) if tr else []
-    mods = [l for l in lines if is_msg_line(l[1]) or l[1].startswith("modifying ")]
+    block = (["%s: overlong field(s) detected" % name] + msg_lines(tr, info, name)) if tr else []
+    mods = [l for l in lines if is_msg_line(l[1]) or l[1].endswith(": overlong field(s) detected")]
     assert mods == [("warn", t) for t in block], (mods, block)
     if block:
         i = texts.index(block[0])
@@ -331,7 +331,7 @@ def all_fields_long_log_format():
     n, tr = check_packet(env, "ab.pkt", data)
     assert tr == [(2, 0, 40), (2, 1, 36), (2, 2, 200)]
     assert env.loglines() == [
-        ("warn", "modifying ab.pkt"),
+        ("warn", "ab.pkt: overlong field(s) detected"),
         ("warn", "ab.pkt#2: area NETMAIL, from %s (5020/1) to %s (5030/2), subject \"%s\": "
          "truncating toUserName 40 -> 35, fromUserName 36 -> 35, subject 200 -> 71"
          % ("F" * 35, "T" * 35, "S" * 71)),
@@ -593,8 +593,8 @@ def log_level_warn():
     assert sorted(env.loglines()) == [
         ("warn", "2.pkt#1: area NETMAIL, from Sysop (5020/1) to %s (5030/2), subject \"Hello\": "
          "truncating toUserName 36 -> 35" % ("x" * 35)),
-        ("warn", "3.pkt: incomplete packet terminator after message #1 (1 byte at offset %d), kept as is" % (58 + len(pmsg()))),
-        ("warn", "modifying 2.pkt")]
+        ("warn", "2.pkt: overlong field(s) detected"),
+        ("warn", "3.pkt: incomplete packet terminator after message #1 (1 byte at offset %d), kept as is" % (58 + len(pmsg())))]
     env.cleanup()
 
 
@@ -1050,7 +1050,7 @@ def read_only_directory():
     assert r.returncode == 1
     assert env.get("1.pkt") == data and env.files() == ["1.pkt", "2.pkt"]
     assert [l for l in env.loglines() if l[0] != "info"] == [
-        ("warn", "modifying 1.pkt"),
+        ("warn", "1.pkt: overlong field(s) detected"),
         ("warn", "1.pkt#1: area NETMAIL, from Sysop (5020/1) to %s (5030/2), subject "
          "\"Hello\": truncating toUserName 40 -> 35" % ("x" * 35)),
         ("err", "1.pkt: can't write 1.tr$: Permission denied, can't rename it to "

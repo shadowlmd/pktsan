@@ -115,10 +115,10 @@ File names are logged with the directory as given on the command line.
 A packet name is followed by the originating and destination addresses from
 the packet header, if the header could be read.
 
-A `modifying` line is followed by one line per modified message: its
-number in the packet, the area (`NETMAIL` for netmail), the sender, the
-recipient and the subject as written to the packet, and the truncated
-fields with their lengths in bytes before and after.
+An `overlong field(s) detected` line is followed by one line per modified
+message: its number in the packet, the area (`NETMAIL` for netmail), the
+sender, the recipient and the subject as written to the packet, and the
+truncated fields with their lengths in bytes before and after.
 
 ```
 2026-09-26 19:42:46 [info] processing directory c:\ftn\inbound
@@ -127,7 +127,7 @@ fields with their lengths in bytes before and after.
 2026-09-26 19:42:46 [warn] c:\ftn\inbound\temp\6ab6fb20.pkt (2:50/4 -> 2:5030/1997): incomplete packet terminator after message #1 (1 byte at offset 662), kept as is
 2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\6ab6fb20.pkt (2:50/4 -> 2:5030/1997): messages 1, modified 0
 2026-09-26 19:42:46 [err] c:\ftn\inbound\temp\9abc0123.pkt is not a packet: only 12 bytes, shorter than a packet header, skipped
-2026-09-26 19:42:46 [warn] modifying c:\ftn\inbound\temp\1234abcd.pkt (2:999/999 -> 2:5030/1997)
+2026-09-26 19:42:46 [warn] c:\ftn\inbound\temp\1234abcd.pkt (2:999/999 -> 2:5030/1997): overlong field(s) detected
 2026-09-26 19:42:46 [warn] 1234abcd.pkt#32: area GENERAL.TEST, from Ivan Petrov (999/999) to All, subject "Re: Configuring FastEcho to toss packets from the unpack directory befo": truncating subject 91 -> 71
 2026-09-26 19:42:46 [warn] 1234abcd.pkt#35: area NETMAIL, from Sysop (999/999) to Jean-Claude Camille Francois Van Va (5030/1997), subject "Fan mail": truncating toUserName 42 -> 35
 2026-09-26 19:42:46 [info] processed c:\ftn\inbound\temp\1234abcd.pkt (2:999/999 -> 2:5030/1997): messages 40, modified 2

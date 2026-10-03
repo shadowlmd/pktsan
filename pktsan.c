@@ -638,7 +638,7 @@ static void ScanPacket(FILE * fh, const Files * F, Scan * S)
             if(++S->Mod == 1 && F != NULL)
             {
                 PktName(F->Name, F->Pkt, S->Hdr);
-                Log(LOG_WARN, "modifying %s", F->Name);
+                Log(LOG_WARN, "%s: overlong field(s) detected", F->Name);
             }
 
             if(F != NULL)
